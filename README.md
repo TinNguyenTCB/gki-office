@@ -20,7 +20,7 @@ Nhân viên mới tham gia đội AI theo vai trò của mình.
 
 ## Xem thử trên GitHub Pages
 
-**https://tinnguyentcb.github.io/ai-mini-office/**
+**(https://tinnguyentcb.github.io/gki-office/)**
 
 GitHub Pages chỉ chạy được phần giao diện, nên bản này là **bản xem thử**: có đủ văn phòng, màn chào, Đơn cam kết,
 sắp xếp nội thất, hồ sơ nhân viên; nút “Giao việc” chạy **mô phỏng** với nội dung ví dụ (không gọi AI).
