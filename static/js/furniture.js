@@ -3,7 +3,8 @@
 //
 // Quy ước hệ cục bộ: +v là "mặt trước" (phía người dùng đứng/ngồi), +u là bên phải khi nhìn từ mặt trước.
 
-import { ROOM, box, getContext, isoSort, poly, project, screenBounds, shade } from "./iso.js";
+import { box, getContext, isoSort, poly, project, screenBounds, shade } from "./iso.js";
+import { rectBlocked, rectHitsWall, rectOnFloor, segmentHitsWall } from "./floorplan.js";
 
 // Trạng thái động do mô phỏng cập nhật (màn hình bật, máy in chạy, mực trên bảng...).
 export const runtime = {
@@ -12,6 +13,7 @@ export const runtime = {
   printerActive: () => false,
   boardInk: 0,
   cabinetOpen: () => false, // ngăn tủ hồ sơ đang kéo ra
+  microwaveOn: () => false, // lò vi sóng đang hâm đồ ăn
   archiveCount: 0,          // số báo cáo đã lưu -> số tập hồ sơ xếp trên nóc tủ
   trashCount: 0,            // số cục giấy trong thùng rác
 };
@@ -138,11 +140,41 @@ function hash(str) {
 
 function screenColor(item) {
   switch (runtime.screenState(item)) {
-    case "typing": return runtime.tick % 16 < 8 ? "#66d895" : "#4fbf7f";
-    case "busy": return "#4fbf7f";
-    case "idle": return "#2c6447";
+    case "typing": case "busy": return "#1e2433";
+    case "idle": return "#2a3550";
     default: return "#16201b";
   }
+}
+
+// Các dòng code tô màu cú pháp trên màn hình; chỉ hiện khi máy đang bật.
+const CODE_COLORS = ["#c792ea", "#82aaff", "#c3e88d", "#f78c6c", "#89ddff", "#ffcb6b"];
+function codeLines(item, u0, u1, zTop, step, face = "pv") {
+  let seed = hash(item.id || "code");
+  const rnd = () => ((seed = Math.imul(seed ^ (seed >>> 13), 1274126177) >>> 0) % 1000) / 1000;
+  const out = [];
+  const rows = Math.floor(11 / step * 1.4);
+  for (let r = 0; r < rows; r++) {
+    const z = zTop - r * step;
+    let u = u0 + Math.floor(rnd() * 3) * 1.6;
+    const last = r === rows - 1;
+    const parts = 1 + Math.floor(rnd() * 3);
+    for (let k = 0; k < parts && u < u1 - 2; k++) {
+      const w = Math.min(u1 - u, 2 + rnd() * 6);
+      const color = CODE_COLORS[Math.floor(rnd() * CODE_COLORS.length)];
+      out.push({
+        face, u0: u, u1: u + w, z0: z - step * 0.45, z1: z,
+        color: () => {
+          const st = runtime.screenState(item);
+          if (st === "off") return null;
+          if (last && st === "idle") return null;
+          return color;
+        },
+      });
+      u += w + 1.2;
+    }
+    if (last) out.push({ face, u0: u, u1: u + 1, z0: z - step * 0.6, z1: z + 0.2, color: () => (runtime.screenState(item) === "typing" && runtime.tick % 30 < 15 ? "#ffffff" : null) });
+  }
+  return out;
 }
 
 function buildDesk(L, item) {
@@ -160,28 +192,11 @@ function buildDesk(L, item) {
   // Màn hình
   L.box(-6, -10, 12, 7, 1, 31, C.metal);
   L.box(-6, -11, 3, 2, 8, 32, C.metal);
-  // Biểu đồ nến trên màn hình (nến cuối nhấp nháy khi đang làm việc).
-  let seed = hash(item.id || "desk");
-  const rnd = () => ((seed = Math.imul(seed ^ (seed >>> 13), 1274126177) >>> 0) % 1000) / 1000;
-  let level = 47;
-  const candles = Array.from({ length: 7 }, (_, i) => {
-    const move = (rnd() - 0.42) * 5;
-    const lo = Math.min(level, level + move), hi = Math.max(level, level + move) + 0.8;
-    level = Math.max(43, Math.min(53, level + move));
-    return { u0: -12 + i * 3.6, z0: lo, z1: hi, up: move >= 0, last: i === 6 };
-  });
+  // Trình soạn code trên màn hình (dòng cuối có con trỏ nhấp nháy khi đang làm việc).
   L.box(-6, -10, 32, 3, 20, 38, C.casing, {
     decals: [
       { face: "pv", u0: -14, u1: 14, z0: 40, z1: 56, color: () => screenColor(item) },
-      ...candles.map(c => ({
-        face: "pv", u0: c.u0, u1: c.u0 + 2, z0: c.z0, z1: c.z1,
-        color: () => {
-          const st = runtime.screenState(item);
-          if (st === "off") return null;
-          if (c.last && st !== "idle" && runtime.tick % 40 < 20) return "#f0ffd8";
-          return c.up ? "#a8f0a0" : "#f08a7a";
-        },
-      })),
+      ...codeLines(item, -12, 12, 53.5, 1.9),
     ],
   });
   // Bàn phím, chuột, cốc, giấy
@@ -248,10 +263,10 @@ function buildBookshelf(L, item) {
   }
 }
 
-// Bảng trắng: biểu đồ cột phân bổ danh mục, vẽ dần từng cột khi Giám đốc lập kế hoạch.
-const INK_BARS = [
-  [-28, 12, "#3a6fb0"], [-21, 20, "#3a6fb0"], [-14, 9, "#2f8a55"], [-7, 24, "#2f8a55"],
-  [0, 15, "#d0a245"], [7, 6, "#c0463a"], [14, 18, "#3a6fb0"], [21, 11, "#2f8a55"],
+// Bảng trắng: bảng kế hoạch (cột "Việc / Đang làm / Xong" với các giấy nhớ), dán dần khi Giám đốc phân công.
+const INK_NOTES = [
+  [-29, 58, "#f2c94c"], [-29, 48, "#82aaff"], [-12, 58, "#f2c94c"], [-12, 48, "#f78c6c"],
+  [5, 58, "#c3e88d"], [5, 48, "#82aaff"], [22, 58, "#c3e88d"], [22, 48, "#f2c94c"],
 ];
 function buildWhiteboard(L) {
   for (const u of [-31, 31]) {
@@ -262,9 +277,12 @@ function buildWhiteboard(L) {
     edge: true,
     decals: [
       { face: "pv", u0: -33, u1: 33, z0: 38, z1: 70, color: "#f3f5ef" },
-      { face: "pv", u0: -30, u1: 29, z0: 41, z1: 41.8, color: "#5c6660" },
-      ...INK_BARS.map(([u0, h, color], i) => ({
-        face: "pv", u0, u1: u0 + 5, z0: 42, z1: 42 + h, color: () => (runtime.boardInk > i ? color : null),
+      { face: "pv", u0: -30, u1: 30, z0: 65, z1: 65.8, color: "#5c6660" },
+      { face: "pv", u0: -14.5, u1: -13.9, z0: 41, z1: 68, color: "#9aa09c" },
+      { face: "pv", u0: 2.7, u1: 3.3, z0: 41, z1: 68, color: "#9aa09c" },
+      { face: "pv", u0: 19.9, u1: 20.5, z0: 41, z1: 68, color: "#9aa09c" },
+      ...INK_NOTES.map(([u0, z, color], i) => ({
+        face: "pv", u0, u1: u0 + 12, z0: z - 7, z1: z, color: () => (runtime.boardInk > i ? color : null),
       })),
     ],
   });
@@ -326,7 +344,7 @@ function buildVending(L) {
 }
 
 function buildSofa(L) {
-  const S = "#4d6a85";
+  const S = SOFA_BLUE;
   L.box(0, 0, 84, 34, 12, 0, shade(S, -0.25));
   L.box(0, -12.5, 84, 9, 26, 12, S, { edge: true });
   L.box(-38, 2, 8, 30, 10, 12, S, { edge: true });
@@ -449,11 +467,160 @@ export function drawPaperBall(ctx, x, y, r, spin = 0) {
   ctx.restore();
 }
 
+// Bàn học sinh liền ghế đỏ: mặt bàn phía sau (-v), ghế phía trước (+v) – học viên ngồi quay về -v.
+// Ghế tách thành phần riêng ("seat" / "back") để người ngồi được vẽ đúng giữa mặt ghế và lưng ghế.
+const STUDENT_RED = "#c2453a";
+function buildStudentDesk(L) {
+  for (const [u, v] of [[-15, -16], [15, -16], [-15, -4], [15, -4]]) L.box(u, v, 3, 3, 24, 0, C.leg);
+  L.box(0, -10, 34, 4, 8, 12, "#7a5f40");
+  L.box(0, -10, 36, 18, 3, 24, "#b08f60", { edge: true });
+  L.box(-6, -11, 10, 7, 0.8, 27, C.paper);
+}
+function buildStudentSeat(L) {
+  for (const [u, v] of [[-7, 6], [7, 6], [-7, 17], [7, 17]]) L.box(u, v, 2.5, 2.5, 14, 0, "#262c29");
+  L.box(0, 11, 18, 14, 3, 14, STUDENT_RED, { edge: true });
+}
+function buildStudentBack(L) {
+  L.box(0, 18.5, 18, 3, 16, 17, shade(STUDENT_RED, -0.15), { edge: true });
+}
+
+// Bàn laptop gọn (phòng riêng của giảng viên).
+function buildLaptopDesk(L, item) {
+  for (const [u, v] of [[-18, -11], [18, -11], [-18, 11], [18, 11]]) L.box(u, v, 3, 3, 28, 0, C.leg);
+  L.box(0, 0, 40, 26, 3, 28, "#c2a274", { edge: true });
+  L.box(-4, 4, 18, 11, 1, 31, "#9aa3ad"); // bàn phím laptop
+  L.box(-4, -2.5, 18, 1.5, 12, 32, "#4a5160", {
+    decals: [
+      { face: "pv", u0: -8, u1: 8, z0: 33.5, z1: 43, color: () => screenColor(item) },
+      ...codeLines(item, -7, 7, 41.8, 1.4),
+    ],
+  });
+  L.box(13, 3, 4, 4, 5, 31, C.mug, { decals: [{ face: "top", u0: -1.5, u1: 1.5, v0: -1.5, v1: 1.5, color: "#5a3a22" }] });
+  L.box(13, -7, 8, 10, 3, 31, "#4f7cac");
+}
+
+// Bục giảng nhỏ cho giảng viên: mặt trước (+v) quay về phía học viên, giảng viên đứng sau (-v).
+function buildPodium(L) {
+  L.box(0, 0, 28, 18, 3, 0, "#5a4632");
+  L.box(0, 1, 24, 14, 36, 3, "#8a6a45", {
+    edge: true,
+    decals: [
+      { face: "pv", u0: -9, u1: 9, z0: 22, z1: 32, color: "#f3f5ef" },
+      { face: "pv", u0: -8, u1: -2, z0: 24, z1: 30, color: "#2a52a8" },
+      { face: "pv", u0: -1, u1: 8, z0: 27.5, z1: 29.5, color: "#2a52a8" },
+      { face: "pv", u0: -1, u1: 6, z0: 24.5, z1: 26, color: "#c0392b" },
+    ],
+  });
+  L.box(0, -1, 28, 20, 3, 39, "#9c7a52", { edge: true });
+  L.box(-5, -2, 12, 9, 1, 42, C.paper);
+  L.box(7, -4, 2, 2, 7, 42, "#2a2f3a"); // micro
+  L.box(7, -1.5, 2, 4, 1.5, 48, "#2a2f3a");
+}
+
+// Tủ lạnh mini.
+function buildFridge(L) {
+  L.box(0, 0, 26, 24, 2, 0, "#4a5160");
+  L.box(0, 0, 26, 24, 44, 2, "#e8edf3", {
+    edge: true,
+    decals: [
+      { face: "pv", u0: -12, u1: 12, z0: 30.5, z1: 31.5, color: "#b9c3d0" },
+      { face: "pv", u0: 8, u1: 10, z0: 34, z1: 42, color: "#8a96a8" },
+      { face: "pv", u0: 8, u1: 10, z0: 16, z1: 27, color: "#8a96a8" },
+      { face: "pv", u0: -9, u1: -4, z0: 36, z1: 40, color: "#f2c94c" }, // nam châm
+      { face: "pv", u0: -6, u1: 1, z0: 20, z1: 26, color: "#ffffff" },  // tờ ghi chú
+    ],
+  });
+}
+
+// Kệ thấp có lò vi sóng.
+function buildMicrowave(L) {
+  L.box(0, 0, 40, 24, 30, 0, "#8a6a45", {
+    edge: true,
+    decals: [
+      { face: "pv", u0: -18, u1: -1, z0: 3, z1: 27, color: "#9c7a52" },
+      { face: "pv", u0: 1, u1: 18, z0: 3, z1: 27, color: "#9c7a52" },
+      { face: "pv", u0: -3, u1: -2, z0: 13, z1: 18, color: "#d8c9a6" },
+      { face: "pv", u0: 2, u1: 3, z0: 13, z1: 18, color: "#d8c9a6" },
+    ],
+  });
+  L.box(-2, -1, 30, 18, 17, 30, "#dfe3ea", {
+    edge: true,
+    decals: [
+      { face: "pv", u0: -13, u1: 5, z0: 33, z1: 44, color: () => (runtime.microwaveOn() ? (runtime.tick % 20 < 10 ? "#ffd27a" : "#f2b84b") : "#2a2f3a") },
+      { face: "pv", u0: 8, u1: 13, z0: 40, z1: 44, color: () => (runtime.microwaveOn() ? "#7bff9b" : "#1e2a22") },
+      { face: "pv", u0: 9, u1: 12, z0: 34, z1: 38, color: "#9aa3ad" },
+    ],
+  });
+  L.box(14, 3, 6, 6, 8, 30, C.mug);
+}
+
+// Thùng các-tông chồng lên nhau trong kho.
+function buildBoxes(L, item) {
+  let seed = hash(item.id || "boxes");
+  const rnd = () => ((seed = Math.imul(seed ^ (seed >>> 15), 2246822507) >>> 0) % 1000) / 1000;
+  const card = "#b98a52";
+  L.box(-7, -5, 18, 16, 14, 0, card, { edge: true, decals: [{ face: "top", u0: -1, u1: 1, v0: -8, v1: 8, color: "#d8b27a" }] });
+  L.box(8, 4, 16, 18, 16, 0, shade(card, -0.08), { edge: true, decals: [{ face: "top", u0: -8, u1: 8, v0: -1, v1: 1, color: "#d8b27a" }] });
+  L.box(-5 + rnd() * 3, -3, 16, 14, 12, 14, shade(card, 0.06), { edge: true, decals: [{ face: "pv", u0: -4, u1: 4, z0: 18, z1: 22, color: "#f1f0e8" }] });
+  if (rnd() < 0.7) L.box(7, 4, 12, 12, 10, 16, shade(card, -0.04), { edge: true });
+}
+
+// Kệ sắt nhiều tầng chất thùng hàng / hộp hồ sơ.
+function buildRack(L, item) {
+  let seed = hash(item.id || "rack");
+  const rnd = () => ((seed = Math.imul(seed ^ (seed >>> 13), 1274126177) >>> 0) % 1000) / 1000;
+  for (const [u, v] of [[-28, -9], [28, -9], [-28, 9], [28, 9]]) L.box(u, v, 3, 3, 72, 0, "#59625e");
+  for (const z of [4, 26, 48, 70]) L.box(0, 0, 60, 20, 2, z, "#7d8783", { edge: true });
+  const colors = ["#b98a52", "#a87c48", "#c99a62", "#6f8fa8", "#d9b44a"];
+  for (const z of [6, 28, 50]) {
+    let u = -26;
+    while (u < 22) {
+      const w = 10 + Math.floor(rnd() * 8);
+      if (u + w > 27) break;
+      if (rnd() < 0.8) L.box(u + w / 2, 0, w - 1, 14, 10 + rnd() * 8, z, colors[Math.floor(rnd() * colors.length)], { edge: true });
+      u += w;
+    }
+  }
+}
+
+// Gạt tàn đứng ở khu hút thuốc (có làn khói mảnh bay lên).
+function buildAshtray(L) {
+  L.box(0, 0, 12, 12, 2, 0, "#3a4240");
+  L.box(0, 0, 4, 4, 26, 2, "#7c8884");
+  L.box(0, 0, 13, 13, 4, 28, "#9aa3a0", { edge: true, decals: [{ face: "top", u0: -4.5, u1: 4.5, v0: -4.5, v1: 4.5, color: "#3a3f3d" }] });
+  L.custom(0, 0, 12, 12, 32, 60, p => {
+    const ctx = getContext(), k = runtime.tick * 0.05;
+    ctx.strokeStyle = "rgba(220,225,220,0.35)";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y);
+    for (let i = 1; i <= 8; i++) ctx.lineTo(p.x + Math.sin(k + i * 0.9) * (1 + i * 0.5), p.y - i * 3.2);
+    ctx.stroke();
+  });
+}
+
+// Ghế băng gỗ.
+// Ghế băng bọc nệm cùng màu xanh với sofa.
+const SOFA_BLUE = "#4d6a85";
+function buildBench(L) {
+  for (const u of [-24, 24]) L.box(u, 0, 4, 16, 14, 0, C.leg);
+  L.box(0, 0, 60, 18, 3, 14, shade(SOFA_BLUE, 0.1), { edge: true });
+  L.box(0, -8, 60, 3, 14, 17, SOFA_BLUE, { edge: true });
+}
+
 // ---------------------------------------------------------------------------
 // Danh mục
 // ---------------------------------------------------------------------------
+const chairParts = v => ({
+  seat: (L, item) => buildChairParts(L, 0, v, 1, item.chairColor || C.chair, "seat"),
+  back: (L, item) => buildChairParts(L, 0, v, 1, item.chairColor || C.chair, "back"),
+});
+
+// seat: chỗ ngồi (nhân viên / học viên); parts: phần ghế vẽ tách riêng để người ngồi nằm giữa.
+// workDesk: bàn gán được cho nhân viên làm "bàn mặc định" / "bàn làm việc".
 export const CATALOG = {
-  desk: { label: "Bàn làm việc", icon: "🖥️", w: 64, d: 34, h: 58, seat: { u: 0, v: 42 }, build: buildDesk },
+  desk: { label: "Bàn làm việc", icon: "🖥️", w: 64, d: 34, h: 58, seat: { u: 0, v: 42 }, workDesk: true, parts: chairParts(42), build: buildDesk },
+  laptopDesk: { label: "Bàn laptop", icon: "💻", w: 40, d: 26, h: 44, seat: { u: 0, v: 32 }, workDesk: true, parts: chairParts(32), build: buildLaptopDesk },
   meeting: { label: "Bàn họp", icon: "🗂️", w: 84, d: 52, h: 42, chat: [{ u: -58, v: 0 }, { u: 58, v: 0 }], build: buildMeeting },
   bookshelf: { label: "Kệ sách", icon: "📚", w: 64, d: 22, h: 84, use: { u: 0, v: 34 }, build: buildBookshelf },
   whiteboard: { label: "Bảng trắng", icon: "📋", w: 70, d: 6, h: 72, use: { u: 0, v: 28 }, build: buildWhiteboard },
@@ -464,31 +631,64 @@ export const CATALOG = {
   plant: { label: "Cây cảnh", icon: "🪴", w: 22, d: 22, h: 52, build: buildPlant },
   cabinet: { label: "Tủ hồ sơ", icon: "🗄️", w: 28, d: 22, h: 68, use: { u: -34, v: 26 }, build: buildCabinet },
   trash: { label: "Thùng rác", icon: "🗑️", w: 14, d: 14, h: 26, build: buildTrash },
+  studentDesk: {
+    label: "Bàn học", icon: "🪑", w: 36, d: 40, h: 34, seat: { u: 0, v: 11 }, student: true,
+    parts: { seat: buildStudentSeat, back: buildStudentBack }, build: buildStudentDesk,
+  },
+  podium: { label: "Bục giảng", icon: "🎤", w: 28, d: 18, h: 50, use: { u: 0, v: -22 }, build: buildPodium },
+  fridge: { label: "Tủ lạnh mini", icon: "🧊", w: 26, d: 24, h: 46, use: { u: 0, v: 27 }, build: buildFridge },
+  microwave: { label: "Lò vi sóng", icon: "🍱", w: 40, d: 24, h: 47, use: { u: 0, v: 27 }, build: buildMicrowave },
+  boxes: { label: "Thùng hàng", icon: "📦", w: 34, d: 30, h: 30, build: buildBoxes },
+  rack: { label: "Kệ kho", icon: "🗄️", w: 60, d: 22, h: 74, build: buildRack },
+  ashtray: { label: "Gạt tàn", icon: "🚬", w: 14, d: 14, h: 32, use: { u: 0, v: 20 }, build: buildAshtray },
+  bench: { label: "Ghế băng", icon: "🪑", w: 60, d: 20, h: 31, build: buildBench },
   chair: {
     label: "Ghế", icon: "🪑", w: 22, d: 22, h: 36,
     build: L => buildChairParts(L, 0, 0, -1, C.chair, "all"),
   },
 };
 
+// Bố cục mặc định tầng 9 – văn phòng do người dùng tự sắp xếp (file gki-van-phong-20261116-1205.json).
+// Id cố định để hồ sơ nhân viên mặc định (team.js) trỏ đúng bàn.
 export const DEFAULT_LAYOUT = [
-  { type: "whiteboard", x: 120, y: 38, rotation: 0 },
-  { type: "bookshelf", x: 41, y: 110, rotation: 3 },
-  { type: "bookshelf", x: 41, y: 185, rotation: 3 },
-  { type: "plant", x: 185, y: 44 },
-  { type: "printer", x: 385, y: 47, rotation: 0 },
-  { type: "desk", x: 455, y: 125, rotation: 2, assignedTo: "manager" },
-  { type: "cabinet", x: 512, y: 52, rotation: 0 },
-  { type: "trash", x: 410, y: 150, rotation: 0 },
-  { type: "desk", x: 150, y: 275, rotation: 0, assignedTo: "analyst" },
-  { type: "plant", x: 220, y: 262 },
-  { type: "desk", x: 290, y: 275, rotation: 0, assignedTo: "quant" },
-  { type: "desk", x: 430, y: 275, rotation: 0, assignedTo: "risk" },
-  { type: "vending", x: 47, y: 410, rotation: 3 },
-  { type: "watercooler", x: 44, y: 470, rotation: 3 },
-  { type: "plant", x: 42, y: 514 },
-  { type: "meeting", x: 270, y: 440, rotation: 0 },
-  { type: "sofa", x: 465, y: 420, rotation: 0 },
-  { type: "plant", x: 514, y: 514 },
+  { id: "f-mwinj9qk-n4tty", type: "printer", x: 300, y: 190, rotation: 3 },
+  { id: "d-manager", type: "desk", x: 204, y: 95, rotation: 3 },
+  { id: "f-mwinj9qk-vni7q", type: "cabinet", x: 256, y: 45, rotation: 0 },
+  { id: "f-mwinj9qk-0knt2", type: "trash", x: 266, y: 108, rotation: 0 },
+  { id: "podium-big", type: "podium", x: 640, y: 165, rotation: 1 },
+  { id: "f-mwinj9qk-wgz2q", type: "studentDesk", x: 460, y: 100, rotation: 1 },
+  { id: "f-mwinj9qk-s5t31", type: "studentDesk", x: 460, y: 160, rotation: 1 },
+  { id: "f-mwinj9qk-84yt4", type: "studentDesk", x: 455, y: 225, rotation: 1 },
+  { id: "f-mwinj9qk-bjvqg", type: "studentDesk", x: 570, y: 225, rotation: 1 },
+  { id: "f-mwinj9qk-hjvkm", type: "studentDesk", x: 515, y: 105, rotation: 1 },
+  { id: "f-mwinj9qk-dnqsv", type: "studentDesk", x: 515, y: 165, rotation: 1 },
+  { id: "f-mwinj9qk-80uk7", type: "studentDesk", x: 515, y: 225, rotation: 1 },
+  { id: "f-mwinj9qk-woesb", type: "studentDesk", x: 565, y: 105, rotation: 1 },
+  { id: "f-mwinj9qk-mbhvd", type: "studentDesk", x: 570, y: 165, rotation: 1 },
+  { id: "f-mwinj9qk-tqb6h", type: "rack", x: 325, y: 45, rotation: 0 },
+  { id: "f-mwinj9qk-850k8", type: "boxes", x: 302, y: 95, rotation: 0 },
+  { id: "f-mwinj9qk-xbcq5", type: "studentDesk", x: 67, y: 495, rotation: 0 },
+  { id: "f-mwinj9qk-16pmm", type: "studentDesk", x: 67, y: 540, rotation: 0 },
+  { id: "f-mwinj9qk-8oj55", type: "studentDesk", x: 127, y: 495, rotation: 0 },
+  { id: "f-mwinj9qk-qgrny", type: "studentDesk", x: 127, y: 540, rotation: 0 },
+  { id: "f-mwinj9qk-vcd7n", type: "bench", x: 44, y: 625, rotation: 3 },
+  { id: "f-mwinj9qk-1lag7", type: "ashtray", x: 88, y: 595, rotation: 0 },
+  { id: "f-mwinj9qk-3enpi", type: "rack", x: 77, y: 740, rotation: 2 },
+  { id: "f-mwinj9qk-hujmy", type: "rack", x: 239, y: 740, rotation: 2 },
+  { id: "f-mwinj9qk-c48t8", type: "boxes", x: 142, y: 730, rotation: 0 },
+  { id: "f-mwinl9qi-9yqtl", type: "laptopDesk", x: 635, y: 240, rotation: 3 },
+  { id: "f-mwinm4s7-4dlcr", type: "laptopDesk", x: 365, y: 175, rotation: 1 },
+  { id: "f-mwinm9yi-jy97m", type: "laptopDesk", x: 365, y: 220, rotation: 1 },
+  { id: "f-mwinn6gf-945vg", type: "whiteboard", x: 290, y: 260, rotation: 3 },
+  { id: "f-mwino0mb-1gjuh", type: "laptopDesk", x: 107, y: 175, rotation: 1 },
+  { id: "f-mwino5dh-02ug9", type: "laptopDesk", x: 107, y: 235, rotation: 1 },
+  { id: "f-mwinobnc-36mfb", type: "laptopDesk", x: 180, y: 155, rotation: 3 },
+  { id: "f-mwinogrn-c5nbr", type: "laptopDesk", x: 180, y: 220, rotation: 3 },
+  { id: "f-mwinol43-7rpvp", type: "laptopDesk", x: 180, y: 265, rotation: 3 },
+  { id: "f-mwinoqt0-sjwkc", type: "laptopDesk", x: 180, y: 310, rotation: 3 },
+  { id: "f-mwinp03n-2bk3z", type: "microwave", x: 48, y: 90, rotation: 3 },
+  { id: "f-mwinp6zs-p4svv", type: "fridge", x: 48, y: 125, rotation: 3 },
+  { id: "f-mwintibm-nrd32", type: "desk", x: 94, y: 370, rotation: 1 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -501,9 +701,27 @@ export function footprint(item, at = item) {
   return { x0: at.x - W / 2, x1: at.x + W / 2, y0: at.y - D / 2, y1: at.y + D / 2, z0: 0, z1: def.h };
 }
 
+// Ghế của bàn (nằm ngoài khung bàn): khung ~18×18 quanh chỗ ngồi.
+export function chairBox(item, at = item) {
+  const def = CATALOG[item.type];
+  if (!def?.seat || def.student) return null;
+  const [dx, dy] = toWorld(rot(item), def.seat.u, def.seat.v);
+  const x = at.x + dx, y = at.y + dy;
+  return { x0: x - 9, x1: x + 9, y0: y - 9, y1: y + 9 };
+}
+
 export function fitsInRoom(item, at = item) {
   const b = footprint(item, at);
-  return b.x0 >= ROOM.min && b.y0 >= ROOM.min && b.x1 <= ROOM.max && b.y1 <= ROOM.max;
+  if (!rectOnFloor(b) || rectBlocked(b)) return false;
+  // Ghế không được lọt vào vách / khung cửa, cũng không được nằm bên kia vách so với bàn (người ngồi sẽ bị "dính tường").
+  return !chairBlocked(item, at);
+}
+
+export function chairBlocked(item, at = item) {
+  const c = chairBox(item, at);
+  if (!c) return false;
+  const seat = { x: (c.x0 + c.x1) / 2, y: (c.y0 + c.y1) / 2 };
+  return rectHitsWall(c) || segmentHitsWall({ x: at.x, y: at.y }, seat);
 }
 
 export function overlapsAny(item, items, at = item, margin = 2) {
@@ -535,34 +753,41 @@ function cached(item, slot, build) {
   return sorted;
 }
 
-export function drawItem(item, alpha = 1) {
-  const prims = cached(item, "main", CATALOG[item.type].build);
+export function drawItem(item, alpha = 1, withParts = false) {
+  const def = CATALOG[item.type];
+  const prims = cached(item, "main", def.build);
   const ctx = getContext();
   ctx.save();
   ctx.globalAlpha = alpha;
   drawPrims(prims, rot(item));
+  if (withParts && def.parts) for (const part of ["seat", "back"]) drawPrims(cached(item, part, def.parts[part]), rot(item));
   ctx.restore();
 }
+
+const primBounds = prims => prims.reduce((b, p) => ({
+  x0: Math.min(b.x0, p.bounds.x0), x1: Math.max(b.x1, p.bounds.x1),
+  y0: Math.min(b.y0, p.bounds.y0), y1: Math.max(b.y1, p.bounds.y1),
+  z0: Math.min(b.z0, p.bounds.z0), z1: Math.max(b.z1, p.bounds.z1),
+}), { x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity });
 
 export function sceneDrawables(items) {
   const out = [];
   for (const item of items) {
-    out.push({ item, bounds: footprint(item), layer: 0, draw: () => drawItem(item) });
-    if (item.type === "desk") {
-      const color = item.chairColor || C.chair;
-      for (const part of ["seat", "back"]) {
-        const prims = cached(item, part, L => buildChairParts(L, 0, CATALOG.desk.seat.v, 1, color, part));
-        const bounds = prims.reduce((b, p) => ({
-          x0: Math.min(b.x0, p.bounds.x0), x1: Math.max(b.x1, p.bounds.x1),
-          y0: Math.min(b.y0, p.bounds.y0), y1: Math.max(b.y1, p.bounds.y1),
-          z0: Math.min(b.z0, p.bounds.z0), z1: Math.max(b.z1, p.bounds.z1),
-        }), { x0: Infinity, x1: -Infinity, y0: Infinity, y1: -Infinity, z0: Infinity, z1: -Infinity });
-        out.push({ item, bounds, layer: 0, draw: () => drawPrims(prims, rot(item)) });
-      }
+    const def = CATALOG[item.type];
+    if (!def.parts) { out.push({ item, bounds: footprint(item), layer: 0, draw: () => drawItem(item) }); continue; }
+    // Món có ghế tách rời: thân món chỉ chiếm khung của chính nó (không gồm ghế) để người ngồi xếp chiều sâu đúng.
+    const main = cached(item, "main", def.build);
+    out.push({ item, bounds: primBounds(main), layer: 0, draw: () => drawItem(item) });
+    for (const part of ["seat", "back"]) {
+      const prims = cached(item, part, def.parts[part]);
+      out.push({ item, bounds: primBounds(prims), layer: 0, draw: () => drawPrims(prims, rot(item)) });
     }
   }
   return out;
 }
+
+// Chỗ ngồi nào là bàn gán được cho nhân viên.
+export const isWorkDesk = item => !!CATALOG[item.type]?.workDesk;
 
 // Chọn món đồ dưới con trỏ: ưu tiên món được vẽ sau cùng (gần người xem nhất).
 // Trước tiên thử đúng ô sàn dưới chuột, sau đó mới tới khung bao trên màn hình (đồ cao).

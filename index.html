@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mini Capital – Văn phòng đầu tư AI</title>
+  <title>GKI – Trung tâm đào tạo CNTT</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@600&family=Be+Vietnam+Pro:wght@400;600;700;800&display=swap">
@@ -13,9 +13,9 @@
     Chữ hiển thị nằm trong static/js/i18n.js (các thuộc tính data-i18n*); chữ tiếng Việt ở đây chỉ là bản mặc định.
   -->
   <script>
-    window.APP_VERSION = "2026.11.10-15";
+    window.APP_VERSION = "2026.11.16-46";
     (function (v) {
-      var modules = ["main", "iso", "furniture", "pathfinding", "characters", "sim", "dialogue", "markdown", "onboarding", "demo", "i18n", "icons", "skyline"];
+      var modules = ["main", "iso", "furniture", "pathfinding", "characters", "sim", "dialogue", "markdown", "onboarding", "demo", "i18n", "icons", "skyline", "floorplan", "roles", "team"];
       var imports = {};
       modules.forEach(function (name) {
         var url = new URL("static/js/" + name + ".js", location.href).href;
@@ -38,16 +38,16 @@
   </script>
 </head>
 <body class="booting">
-  <canvas id="officeCanvas" data-i18n-aria-label="a11y.office" aria-label="Văn phòng Mini Capital"></canvas>
+  <canvas id="officeCanvas" data-i18n-aria-label="a11y.office" aria-label="Văn phòng GKI"></canvas>
 
   <!-- Thanh trên cùng -->
   <header class="topbar ui">
     <button id="menuButton" class="icon-btn" type="button" data-i18n-aria-label="a11y.openMenu" aria-label="Mở menu" aria-expanded="false" aria-controls="drawer"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
     <div class="brand">
-      <span class="logo" aria-hidden="true">MC</span>
+      <img class="logo-img" src="static/logo.svg" alt="GKI">
       <div>
-        <strong>Mini Capital</strong>
-        <small data-i18n="brand.tagline">Văn phòng AI nghiên cứu &amp; quản lý cổ phiếu</small>
+        <strong class="sr-only">GKI</strong>
+        <small data-i18n="brand.tagline">Trung tâm đào tạo CNTT vận hành bởi đội ngũ AI</small>
       </div>
     </div>
     <div class="topbar-right">
@@ -70,9 +70,9 @@
 
     <section class="drawer-section">
       <h3 class="ttl"><i data-icon="settings"></i><span data-i18n="menu.ai">Cài đặt AI</span></h3>
-      <label for="leaderSelect" data-i18n="menu.leaderModel">Giám đốc đầu tư</label>
+      <label for="leaderSelect" data-i18n="menu.leaderModel">Giám đốc đào tạo</label>
       <select id="leaderSelect"><option data-i18n="common.loading">Đang tải…</option></select>
-      <label for="workerSelect" data-i18n="menu.teamModel">Đội phân tích (3 chuyên viên)</label>
+      <label for="workerSelect" data-i18n="menu.teamModel">Đội ngũ (giảng viên &amp; chuyên viên)</label>
       <select id="workerSelect"><option data-i18n="common.loading">Đang tải…</option></select>
       <p class="muted" data-i18n-html="menu.modelHint">Model thiếu API key trong <code>.env</code> sẽ bị khoá.</p>
     </section>
@@ -102,6 +102,12 @@
           <button id="furnitureDelete" class="danger small has-ico" type="button" disabled><i data-icon="trash"></i><span data-i18n="furn.delete">Xoá</span></button>
           <button id="furnitureReset" class="secondary small has-ico" type="button"><i data-icon="reset"></i><span data-i18n="furn.reset">Mặc định</span></button>
         </div>
+        <div class="btn-row">
+          <button id="layoutExport" class="secondary small has-ico" type="button"><i data-icon="save"></i><span data-i18n="layout.export">Lưu ra file</span></button>
+          <button id="layoutImport" class="secondary small has-ico" type="button"><i data-icon="folder"></i><span data-i18n="layout.import">Mở file</span></button>
+          <input id="layoutFile" type="file" accept=".json,application/json" hidden>
+        </div>
+        <p class="muted" data-i18n="layout.hint">Lưu bố cục, đồ đạc và hồ sơ nhân viên ra file để sao lưu hoặc mang sang máy khác.</p>
         <ul id="furnitureWarnings" class="warnings" hidden></ul>
         <div id="furnitureHint" class="muted" aria-live="polite"></div>
       </div>
@@ -119,9 +125,9 @@
   </aside>
 
   <!-- Báo cáo (trái) -->
-  <section id="reportPanel" class="panel panel-left glass ui" data-i18n-aria-label="report.title" aria-label="Báo cáo đầu tư">
+  <section id="reportPanel" class="panel panel-left glass ui" data-i18n-aria-label="report.title" aria-label="Tài liệu đào tạo">
     <div class="panel-head">
-      <h2 class="ttl"><i data-icon="report"></i><span data-i18n="report.title">Báo cáo đầu tư</span></h2>
+      <h2 class="ttl"><i data-icon="report"></i><span data-i18n="report.title">Tài liệu đào tạo</span></h2>
       <div class="panel-actions">
         <button id="openCabinet" class="icon-btn small" type="button" data-i18n-aria-label="cabinet.open" data-i18n-title="cabinet.open" aria-label="Mở tủ hồ sơ" title="Mở tủ hồ sơ"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M5 9h14M5 15h14M10.5 6h3M10.5 12h3M10.5 18h3"/></svg></button>
         <button id="reportExpand" class="icon-btn small" type="button" data-i18n-aria-label="report.expand" data-i18n-title="report.expand" aria-label="Phóng to toàn màn hình" title="Phóng to toàn màn hình" aria-pressed="false"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
@@ -130,7 +136,7 @@
     </div>
     <div id="reportMeta" class="report-meta" hidden></div>
     <article id="reportBody" class="report-body">
-      <p class="placeholder" data-i18n="report.placeholder">Báo cáo sẽ xuất hiện ở đây sau khi Giám đốc đầu tư thẩm định và ký duyệt.</p>
+      <p class="placeholder" data-i18n="report.placeholder">Tài liệu sẽ xuất hiện ở đây sau khi Giám đốc đào tạo duyệt và ký.</p>
     </article>
     <div id="reportFoot" class="report-foot" hidden>
       <button id="copyResult" class="secondary small has-ico" type="button" disabled data-i18n-title="report.copy" title="Sao chép"><i data-icon="copy"></i><span data-i18n="report.copy">Sao chép</span></button>
@@ -168,6 +174,64 @@
     </section>
   </div>
 
+  <!-- Hồ sơ nhân viên: thêm / sửa tên, vai trò, bàn, ngoại hình -->
+  <div id="staffModal" class="modal cabinet-modal" hidden>
+    <section class="cabinet-card staff-card glass" role="dialog" aria-modal="true" aria-labelledby="staffTitle">
+      <div class="panel-head">
+        <h2 id="staffTitle" class="ttl"><i data-icon="team"></i><span data-i18n="staff.title">Hồ sơ nhân viên</span></h2>
+        <button id="staffClose" class="icon-btn small" type="button" data-i18n-aria-label="cabinet.close" aria-label="Đóng"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="staff-body">
+        <aside class="staff-side">
+          <ul id="staffList" class="staff-list"></ul>
+          <button id="staffAdd" class="small" type="button"></button>
+        </aside>
+        <div class="staff-form">
+          <div class="staff-top">
+            <div class="staff-preview">
+              <canvas id="staffPreview" aria-hidden="true"></canvas>
+              <button id="staffTurn" class="secondary small" type="button"></button>
+            </div>
+            <div class="staff-fields">
+              <label for="staffName" data-i18n="staff.name">Tên</label>
+              <input id="staffName" type="text" maxlength="24" autocomplete="off">
+              <label for="staffGender" data-i18n="staff.gender">Giới tính</label>
+              <select id="staffGender"></select>
+              <label for="staffRole" data-i18n="staff.role">Vai trò</label>
+              <select id="staffRole"></select>
+              <p id="staffRoleHint" class="muted"></p>
+              <label for="staffHome" data-i18n="staff.homeDesk">Bàn mặc định</label>
+              <select id="staffHome"></select>
+              <label for="staffWork" data-i18n="staff.workDesk">Bàn làm việc</label>
+              <select id="staffWork"></select>
+              <p class="muted" data-i18n="staff.deskHint"></p>
+            </div>
+          </div>
+          <h3 class="sub-h" data-i18n="staff.look">Ngoại hình</h3>
+          <div class="look-grid">
+            <span class="opt-label" data-i18n="staff.skin">Màu da</span><div id="staffSkin" class="swatches"></div>
+            <span class="opt-label" data-i18n="staff.hair">Màu tóc</span><div id="staffHair" class="swatches"></div>
+            <label class="opt-label" for="staffHairStyle" data-i18n="staff.hairStyle">Kiểu tóc</label><select id="staffHairStyle"></select>
+            <label class="opt-label" for="staffOutfit" data-i18n="staff.outfit">Trang phục</label>
+            <div class="pair"><select id="staffOutfit"></select><select id="staffBottom" data-i18n-aria-label="staff.bottom" aria-label="Quần / váy"></select></div>
+            <span class="opt-label"></span>
+            <div class="colors">
+              <label><input id="staffC-jacket" type="color"><span data-i18n="staff.jacket">Áo khoác</span></label>
+              <label><input id="staffC-shirt" type="color"><span data-i18n="staff.shirt">Áo trong</span></label>
+              <label><input id="staffC-accent" type="color"><span data-i18n="staff.accent">Cà vạt</span></label>
+              <label><input id="staffC-pants" type="color"><span data-i18n="staff.pants">Quần / váy</span></label>
+            </div>
+            <span class="opt-label" data-i18n="staff.acc">Phụ kiện</span><div id="staffAcc" class="acc-list"></div>
+          </div>
+          <div class="printer-foot">
+            <button id="staffRandom" class="secondary small" type="button"></button>
+            <button id="staffDelete" class="danger small" type="button"></button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
   <!-- Máy in: chọn hồ sơ đã lưu để in -->
   <div id="printer" class="modal cabinet-modal" hidden>
     <section class="cabinet-card glass" role="dialog" aria-modal="true" aria-labelledby="printerTitle">
@@ -191,6 +255,10 @@
       <h2 class="ttl"><i data-icon="team"></i><span data-i18n="team.title">Đội ngũ</span></h2>
       <button class="icon-btn small" type="button" data-collapse="side" data-i18n-aria-label="a11y.collapse" aria-label="Thu gọn"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg></button>
     </div>
+    <div class="team-tools">
+      <button id="workModeBtn" class="secondary small" type="button" aria-pressed="false"></button>
+      <button id="manageStaff" class="secondary small" type="button"></button>
+    </div>
     <ul id="teamList" class="team-list"></ul>
     <h2 class="sub ttl"><i data-icon="clock"></i><span data-i18n="log.title">Nhật ký hoạt động</span></h2>
     <ul id="activityLog" class="activity-log"></ul>
@@ -198,6 +266,7 @@
 
   <!-- Phóng to / thu nhỏ văn phòng -->
   <div id="zoomControls" class="zoom-controls glass ui" role="group" data-i18n-aria-label="zoom.group" aria-label="Thu phóng văn phòng">
+    <div id="floorSwitch" class="floor-switch" role="radiogroup" data-i18n-aria-label="floor.switch" aria-label="Chọn tầng"></div>
     <button id="zoomOutBtn" class="icon-btn small" type="button" data-i18n-aria-label="zoom.out" data-i18n-title="zoom.out" aria-label="Thu nhỏ" title="Thu nhỏ ( - )"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg></button>
     <span id="zoomLevel" class="zoom-level" aria-live="polite">100%</span>
     <button id="zoomInBtn" class="icon-btn small" type="button" data-i18n-aria-label="zoom.in" data-i18n-title="zoom.in" aria-label="Phóng to" title="Phóng to ( + )"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
@@ -209,24 +278,40 @@
 
   <!-- Khung giao nhiệm vụ (giữa) -->
   <section id="taskbar" class="taskbar glass ui" data-i18n-aria-label="a11y.task" aria-label="Giao nhiệm vụ">
-    <div class="status-line" id="statusTag" role="status"><span id="statusMessage">Đang kết nối backend…</span></div>
+    <div class="task-head">
+      <div class="status-line" id="statusTag" role="status"><span id="statusMessage">Đang kết nối backend…</span></div>
+      <button class="icon-btn small" type="button" data-collapse="task" data-i18n-aria-label="a11y.collapse" data-i18n-title="a11y.collapse" aria-label="Thu gọn" title="Thu gọn"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg></button>
+    </div>
+    <div class="task-opts">
+      <div id="taskKinds" class="kind-picker" role="radiogroup" data-i18n-aria-label="task.kind" aria-label="Loại nhiệm vụ"></div>
+      <div id="taskMembers" class="task-members">
+        <span class="opt-label" data-i18n="task.members">Thành viên</span>
+        <div id="taskMemberList" class="member-list"></div>
+      </div>
+      <div id="taskLesson" class="task-lesson" hidden>
+        <label><span data-i18n="task.teacher">Giảng viên</span><select id="lessonTeacher"></select></label>
+        <label><span data-i18n="task.room">Phòng học</span><select id="lessonRoom"></select></label>
+        <label><span data-i18n="task.assistant">Trợ giảng 1 (cuối lớp)</span><select id="lessonAssistant"></select></label>
+        <label><span data-i18n="task.assistant2">Trợ giảng 2 (cuối lớp)</span><select id="lessonAssistant2"></select></label>
+        <label class="num"><span data-i18n="task.students">Học viên</span><span class="num-wrap"><input id="lessonStudents" type="number" min="0" step="1"><small id="lessonMax"></small></span></label>
+      </div>
+    </div>
     <div class="task-row">
-      <textarea id="taskInput" rows="2" data-i18n-placeholder="task.placeholder" placeholder="Ví dụ: Phân tích cổ phiếu ngân hàng, tôi có 100 triệu, muốn đầu tư dài hạn 3 năm, chấp nhận rủi ro trung bình."></textarea>
+      <textarea id="taskInput" rows="2" placeholder="Nhập yêu cầu cho trung tâm…"></textarea>
       <button id="missionButton" type="button" disabled>Giao việc</button>
     </div>
-    <small class="muted" data-i18n="task.hint">Ctrl + Enter để gửi · Lăn chuột để phóng to, kéo để di chuyển, nhấp đúp để về mặc định · Báo cáo do AI tạo, chỉ mang tính tham khảo.</small>
+    <small class="muted" data-i18n="task.hint">Ctrl + Enter để gửi · Lăn chuột để phóng to, kéo để di chuyển, nhấp đúp để về mặc định · Tài liệu do AI soạn, chỉ mang tính tham khảo.</small>
   </section>
+
+  <!-- Khung giao việc thu gọn: nút ở góc dưới -->
+  <button id="taskTab" class="task-tab ui folded" type="button" data-i18n-aria-label="a11y.openTask" aria-label="Mở khung giao việc"></button>
 
   <!-- Màn chào + chọn ngôn ngữ -->
   <div id="intro" class="intro" hidden>
     <div class="intro-inner">
-      <svg class="intro-mark" viewBox="0 0 120 120" aria-hidden="true">
-        <rect x="6" y="6" width="108" height="108" rx="26" class="mark-bg"/>
-        <polyline points="22,84 44,64 60,74 82,44 98,30" class="mark-line"/>
-        <circle cx="98" cy="30" r="5" class="mark-dot"/>
-      </svg>
-      <h1 class="intro-title"><span>Mini</span> <span>Capital</span></h1>
-      <p class="intro-tag" data-i18n="intro.tag">Văn phòng AI nghiên cứu &amp; quản lý cổ phiếu</p>
+      <img class="intro-logo" src="static/logo.svg" alt="">
+      <h1 class="sr-only">GKI</h1>
+      <p class="intro-tag" data-i18n="intro.tag">Trung tâm đào tạo CNTT vận hành bởi đội ngũ AI</p>
       <p class="intro-hello" data-i18n="intro.hello">Xin chào, chào mừng Quý khách!</p>
       <div class="intro-lang">
         <p class="intro-lang-label" data-i18n="intro.chooseLang">Chọn ngôn ngữ</p>
@@ -244,8 +329,8 @@
   <div id="pledge" class="modal" hidden role="dialog" aria-modal="true" aria-labelledby="pledgeTitle">
     <form id="pledgeForm" class="paper" novalidate>
       <header class="letterhead">
-        <span class="logo">MC</span>
-        <div><strong>MINI CAPITAL</strong><small data-i18n="brand.tagline">Văn phòng AI nghiên cứu &amp; quản lý cổ phiếu</small></div>
+        <img class="logo-img" src="static/logo.svg" alt="GKI">
+        <div><strong class="sr-only">GKI</strong><small data-i18n="brand.tagline">Trung tâm đào tạo CNTT vận hành bởi đội ngũ AI</small></div>
         <span id="pledgeNo" class="doc-no"></span>
       </header>
       <h2 id="pledgeTitle" data-i18n="pledge.title">ĐƠN CAM KẾT SỬ DỤNG DỊCH VỤ</h2>
@@ -274,7 +359,7 @@
           <span id="clientPrinted" class="printed"></span>
         </div>
         <div class="sign-box">
-          <span class="sign-label"><span data-i18n="pledge.officeLabel">ĐẠI DIỆN MINI CAPITAL</span><br><small data-i18n="pledge.officeSub">Giám đốc đầu tư (AI)</small></span>
+          <span class="sign-label"><span data-i18n="pledge.officeLabel">ĐẠI DIỆN GKI</span><br><small data-i18n="pledge.officeSub">Giám đốc đào tạo (AI)</small></span>
           <span id="officeSignature" class="signature written" data-i18n="pledge.officeSign">Giám đốc AI</span>
           <svg id="stamp" class="stamp" viewBox="0 0 140 140" aria-hidden="true">
             <defs>
@@ -284,12 +369,12 @@
             <g filter="url(#ink)">
               <circle cx="70" cy="70" r="64" class="ring"/>
               <circle cx="70" cy="70" r="40" class="ring thin"/>
-              <text class="ring-text"><textPath href="#stampCircle" startOffset="0" data-i18n="pledge.stampRing">MINI CAPITAL ✦ VĂN PHÒNG ĐẦU TƯ AI ✦</textPath></text>
+              <text class="ring-text"><textPath href="#stampCircle" startOffset="0" data-i18n="pledge.stampRing">GKI ✦ TRUNG TÂM ĐÀO TẠO CNTT ✦</textPath></text>
               <text x="70" y="62" class="star">★</text>
               <text x="70" y="82" class="center-text" data-i18n="pledge.stampCenter">ĐÃ DUYỆT</text>
             </g>
           </svg>
-          <span class="printed">Mini Capital</span>
+          <span class="printed">GKI</span>
         </div>
       </div>
 

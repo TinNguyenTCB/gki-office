@@ -2,22 +2,25 @@
 
 import { ISO, bindContext, floorRect, isoSort, line, poly, project, unproject } from "./iso.js";
 import {
-  CATALOG, DEFAULT_LAYOUT, drawItem, drawPaperBall, fitsInRoom, footprint, overlapsAny, pickItem, rot, runtime,
-  sceneDrawables, seatPoint, usePoint,
+  CATALOG, DEFAULT_LAYOUT, chairBlocked, drawItem, toWorld, drawPaperBall, fitsInRoom, footprint, isWorkDesk, overlapsAny, pickItem, rot, runtime,
+  sceneDrawables, seatPoint,
 } from "./furniture.js";
-import { nearestWalkable, rebuild, reachable } from "./pathfinding.js";
+import { rebuild, reachable } from "./pathfinding.js";
 import {
-  ORDER, TICK_HZ, agentDrawables, applyActivity, applyHandoff, applyStatus, bubbleOf, effects, fileReportScene, flags,
-  eraseBoardScene, getTick, lookAt, printReportScene, renameStaff, runScript, seatEveryone, setLayout, staff, trashReportScene, update,
+  TICK_HZ, agentDrawables, allAgents, seatArrivals, visibleAgents, applyActivity, applyHandoff, applyStatus, bubbleOf, classroomDesks, effects, endLesson,
+  choreAgent, fileReportScene, flags, eraseBoardScene, getTick, lessonState, lookAt, printReportScene, runScript, seatEveryone, setInJob,
+  setLayout, setWorkMode, staff, startLesson, syncStaff, trashReportScene, update,
 } from "./sim.js";
-import { drawAgent, drawOverlay, roleColor } from "./characters.js";
-import { duties, titles } from "./dialogue.js";
+import { ACCESSORIES, BOTTOMS, GENDERS, HAIRS, HAIR_STYLES, OUTFITS, SKINS, drawAgent, drawOverlay, randomLook } from "./characters.js";
 import { applyI18n, clientName, fmtDate, fmtDateTime, fmtTime, getLang, LANGS, setLang, t } from "./i18n.js";
 import { renderMarkdown } from "./markdown.js";
 import { applyIcons, icon, setLabel } from "./icons.js";
 import { drawSkyline } from "./skyline.js";
+import { FLOOR, FLOOR_IDS, PLAN, PLAN_VERSION, WALLS, WINDOWS, drawFloorPlan, floorRooms, planX, roomAt, roomAtOn, roomFloorOf, setDoorSensor, setFloor, wallDrawables } from "./floorplan.js";
 import { delay, loadClient, openPledge, playIntro } from "./onboarding.js";
 import { cancelDemo, isDemoRunning, runDemo } from "./demo.js";
+import { KIND_KEYS, ROLE_COLOR, STAFF_ROLES, kindDoc, kindName, kindPlaceholder, roleDuty, roleTitle, taskText } from "./roles.js";
+import { DIRECTOR_ID, MAX_STAFF, displayName, loadTeam, newMemberId, sanitizeTeam, saveTeam } from "./team.js";
 
 const $ = id => document.getElementById(id);
 applyIcons();
@@ -35,83 +38,98 @@ let client = loadClient();
 // ===========================================================================
 // Bố trí nội thất
 // ===========================================================================
-const LAYOUT_KEY = "ai-office-layout-v2";
-const LEGACY_IDS = { researcher: "analyst", coder: "quant", tester: "risk" }; // bản IT cũ -> công ty cổ phiếu
+const LAYOUT_KEY = "ai-office-layout-v4"; // v4: trung tâm đào tạo CNTT (bàn gán qua hồ sơ nhân viên, lớp học có bục giảng)
 const newId = () => `f-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
+// Bố cục lưu theo mặt bằng cũ (planVersion < PLAN_VERSION) được đổi toạ độ sang mặt bằng hiện tại.
+const PLAN_VER_KEY = "ai-office-plan-version";
+function cleanLayout(list, planVersion) {
+  const seen = new Set();
+  const move = planVersion < 2 ? planX : x => x; // v2: cánh trái rộng thêm 40
+  return (Array.isArray(list) ? list : [])
+    .filter(it => it && CATALOG[it.type] && Number.isFinite(it.x) && Number.isFinite(it.y))
+    .map(it => ({ id: String(it.id || newId()), type: it.type, x: move(it.x), y: it.y, rotation: rot(it) }))
+    .filter(it => !seen.has(it.id) && seen.add(it.id));
+}
 function loadLayout() {
   const saved = store.get(LAYOUT_KEY, null);
-  if (Array.isArray(saved) && saved.length) {
-    const items = saved.filter(it => it && CATALOG[it.type] && Number.isFinite(it.x) && Number.isFinite(it.y))
-      .map(it => {
-        const who = LEGACY_IDS[it.assignedTo] || it.assignedTo;
-        return { id: String(it.id || newId()), type: it.type, x: it.x, y: it.y, rotation: rot(it), assignedTo: staff[who] ? who : "" };
-      });
-    const seen = new Set();
-    for (const it of items) {
-      if (it.type !== "desk" || !it.assignedTo) continue;
-      if (seen.has(it.assignedTo)) it.assignedTo = ""; else seen.add(it.assignedTo);
-    }
-    if (items.length) return addFixtures(items);
+  const ver = store.get(PLAN_VER_KEY, 1);
+  const items = cleanLayout(saved, ver);
+  if (items.length) {
+    if (ver < PLAN_VERSION) { store.set(LAYOUT_KEY, items); store.set(PLAN_VER_KEY, PLAN_VERSION); }
+    return items;
   }
+  store.set(PLAN_VER_KEY, PLAN_VERSION);
   return defaultLayout();
 }
+const defaultLayout = () => DEFAULT_LAYOUT.map(it => ({ id: newId(), rotation: 0, ...it }));
 
-// Bản cũ chưa có tủ hồ sơ / thùng rác: tự kê thêm một lần cạnh bàn Giám đốc (người dùng xoá sau đó thì thôi).
-const FIXTURE_KEY = "ai-office-fixtures-v1";
-function addFixtures(items) {
-  if (store.get(FIXTURE_KEY, false)) return items;
-  store.set(FIXTURE_KEY, true);
-  const desk = items.find(it => it.type === "desk" && it.assignedTo === "manager");
-  const seat = desk ? seatPoint(desk) : { x: 455, y: 83 };
-  const seats = items.filter(it => it.type === "desk").map(seatPoint);
-  const fine = (item, list) => {
-    if (!fitsInRoom(item) || overlapsAny(item, list)) return false;
-    const b = footprint(item); // chừa khoảng trống quanh ghế Giám đốc
-    if (Math.hypot(Math.max(b.x0 - seat.x, 0, seat.x - b.x1), Math.max(b.y0 - seat.y, 0, seat.y - b.y1)) < 24) return false;
-    rebuild([...list, item]);
-    if (!seats.every(p => reachable(seat, p))) return false;
-    if (item.type !== "cabinet") return true;
-    const use = usePoint(item), w = use && nearestWalkable(use.x, use.y);
-    return !!w && Math.hypot(w.x - use.x, w.y - use.y) < 10 && reachable(seat, w);
-  };
-  let added = false;
-  for (const type of ["cabinet", "trash"]) {
-    if (items.some(it => it.type === type)) continue;
-    const preset = DEFAULT_LAYOUT.find(it => it.type === type);
-    const cands = [{ x: preset.x, y: preset.y }];
-    for (let x = 40; x <= 520; x += 5) {
-      for (let y = 40; y <= 520; y += 5) {
-        const d = Math.hypot(x - seat.x, y - seat.y);
-        if (d > 25 && d < 170) cands.push({ x, y, d });
-      }
-    }
-    cands.sort((a, b) => (a.d ?? 0) - (b.d ?? 0));
-    for (const c of cands.slice(0, 400)) {
-      const item = { id: newId(), type, x: c.x, y: c.y, rotation: 0, assignedTo: "" };
-      if (fine(item, items)) { items.push(item); added = true; break; }
-    }
-  }
-  if (added) store.set(LAYOUT_KEY, items.map(({ _cache, ...rest }) => rest));
-  return items;
-}
-const defaultLayout = () => DEFAULT_LAYOUT.map(it => ({ id: newId(), assignedTo: "", rotation: 0, ...it }));
+// Mỗi tầng một bố cục riêng. Tầng 9 giữ khoá lưu cũ; tầng 6 mới tạo, ban đầu chỉ có phòng (chưa có đồ).
+const FLOOR_LAYOUT_KEYS = { 9: LAYOUT_KEY, 6: "ai-office-layout-f6" };
+const FLOOR_KEY = "ai-office-floor";
+const defaultFloorLayout = f => (f === 9 ? defaultLayout() : []);
+const layouts = { 9: loadLayout(), 6: cleanLayout(store.get(FLOOR_LAYOUT_KEYS[6], []), PLAN_VERSION) };
+let layout = layouts[FLOOR];
 
-let layout = loadLayout();
+// Bàn ở tầng nào (để biết nhân viên thuộc tầng nào).
+const deskFloor = id => FLOOR_IDS.find(f => (f === FLOOR ? layout : layouts[f]).some(it => it.id === id)) || 9;
+const teamWithFloors = () => team.map(r => ({ ...r, floor: deskFloor(r.homeDesk) }));
 
 function commitLayout({ persist = true } = {}) {
+  layouts[FLOOR] = layout;
   rebuild(layout);
   setLayout(layout);
-  if (persist && !store.set(LAYOUT_KEY, layout.map(({ _cache, ...rest }) => rest))) {
+  if (persist && FLOOR === 9) store.set(PLAN_VER_KEY, PLAN_VERSION);
+  if (persist && !store.set(FLOOR_LAYOUT_KEYS[FLOOR], layout.map(({ _cache, ...rest }) => rest))) {
     setHint(t("furn.storageFail"));
   }
+  syncStaff(teamWithFloors(), titles());
   renderEditor();
+  if (!$("staffModal").hidden) renderStaffEditor();
+  if (typeof renderTaskForm === "function" && document.readyState !== "loading") try { renderTaskForm(); } catch { /* lúc khởi động */ }
+}
+
+// Đổi tầng đang xem: mặt bằng + đồ đạc + người của tầng đó (người ở tầng khác tạm "vắng mặt").
+function switchFloor(id, { remember = true } = {}) {
+  if (!FLOOR_IDS.includes(id) || id === FLOOR) return;
+  layouts[FLOOR] = layout;
+  editor.selectedId = null;
+  editor.placing = null;
+  editor.drag = null;
+  setFloor(id);
+  layout = layouts[id];
+  if (remember) store.set(FLOOR_KEY, id);
+  commitLayout({ persist: false });
+  seatArrivals();
+  renderFloorSwitch();
+  if (!$("staffModal").hidden) renderStaffEditor();
+}
+
+// ===========================================================================
+// Đội ngũ: hồ sơ nhân viên (tên, vai trò, ngoại hình, bàn mặc định / bàn làm việc)
+// ===========================================================================
+let team = loadTeam();
+const nameOf = id => { const r = team.find(x => x.id === id); return r ? displayName(r, team) : id; };
+const recOf = id => team.find(r => r.id === id) || null;
+// Bàn gán được cho nhân viên ở mọi tầng (hồ sơ nhân viên); floorDesks = chỉ tầng đang xem (nhãn trên sơ đồ).
+const deskItems = () => FLOOR_IDS.flatMap(f => (f === FLOOR ? layout : layouts[f]).filter(isWorkDesk));
+const floorDesks = () => layout.filter(isWorkDesk);
+const roleColor = id => ROLE_COLOR[recOf(id)?.role] || "#8eb1fc";
+const titles = () => Object.fromEntries(team.map(r => [r.id, nameOf(r.id)]));
+
+function applyTeam({ persist = true } = {}) {
+  syncStaff(teamWithFloors(), titles());
+  if (persist && !saveTeam(team)) toast(t("furn.storageFail"), 4000, "alert");
+  renderTeam();
+  renderAssignmentOptions();
+  renderTaskForm();
+  if (editor.open) renderEditor();
 }
 
 // ===========================================================================
 // Khung nhìn: văn phòng (toạ độ logic 620×620) được co giãn vào vùng trống giữa các khung giao diện.
 // ===========================================================================
-const ROOM_BOX = { x0: 48, y0: -10, x1: 572, y1: 592 }; // vùng logic cần hiển thị (gồm cả bảng tên trên đầu)
+const ROOM_BOX = { x0: -66, y0: -24, x1: 650, y1: 660 }; // vùng logic cần hiển thị (gồm cả bảng tên trên đầu)
 const view = { scale: 1, ox: 0, oy: 0, dpr: 1, w: 0, h: 0 };
 const reportView = { expanded: false };
 
@@ -124,13 +142,13 @@ function layoutView() {
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
   }
-  let top = 64, bottom = H - 12, left = 12, right = W - 12;
-  const task = $("taskbar");
-  if (visible(task)) bottom = task.getBoundingClientRect().top - 8;
-  if (W > 1000) {
-    if (visible($("reportPanel")) && !reportView.expanded) left = $("reportPanel").getBoundingClientRect().right + 8;
-    if (visible($("sidePanel"))) right = $("sidePanel").getBoundingClientRect().left - 8;
-  }
+  // Vùng đặt văn phòng CỐ ĐỊNH theo kích thước cửa sổ – không phụ thuộc khung nào đang mở/đóng,
+  // nên mở menu, thu gọn khung báo cáo / đội ngũ / giao việc không làm văn phòng dịch chuyển hay co giãn.
+  // Chừa sẵn chỗ cho khung giao việc (dưới) và hai khung bên (khi màn hình đủ rộng).
+  const top = 64;
+  const bottom = H - Math.min(230, Math.round(H * 0.3));
+  const sideW = W > 1200 ? Math.min(352, Math.round(W * 0.24)) : 12;
+  const left = sideW, right = W - sideW;
   const bw = ROOM_BOX.x1 - ROOM_BOX.x0, bh = ROOM_BOX.y1 - ROOM_BOX.y0;
   const availW = Math.max(240, right - left), availH = Math.max(240, bottom - top);
   const scale = Math.min(availW / bw, availH / bh);
@@ -144,9 +162,11 @@ function layoutView() {
   if (camera.focus === null) camera.focus = { ...view.home };
   if (camera.follow) camera.targetZoom = followZoom();
   // Cụm nút zoom nằm ở góc trên-phải của vùng trống, né khung bên và các nút 📋 / 👥 khi khung bị thu gọn.
+  // (Cụm nút là giao diện, không phải văn phòng: nó bám theo khung bên đang mở/đóng.)
   const zc = $("zoomControls");
-  let zRight = right;
-  let zLeft = left;
+  let zRight = W - 12, zLeft = 12;
+  if (visible($("sidePanel"))) zRight = $("sidePanel").getBoundingClientRect().left - 8;
+  if (visible($("reportPanel")) && !reportView.expanded) zLeft = $("reportPanel").getBoundingClientRect().right + 8;
   if (visible($("sideTab"))) zRight = Math.min(zRight, $("sideTab").getBoundingClientRect().left - 8);
   if (visible($("reportTab"))) zLeft = Math.max(zLeft, $("reportTab").getBoundingClientRect().right + 8);
   let zTop = top + 2;
@@ -206,6 +226,22 @@ function resetZoom() {
   camera.manual = null;
   updateZoomUi();
 }
+// ---- Chuyển tầng ----
+function renderFloorSwitch() {
+  const box = $("floorSwitch");
+  box.replaceChildren(...FLOOR_IDS.map(f => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `floor-btn${f === FLOOR ? " on" : ""}`;
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", String(f === FLOOR));
+    b.textContent = t("floor.name", { n: f });
+    b.addEventListener("click", () => switchFloor(f));
+    return b;
+  }));
+  layoutView();
+}
+
 function updateZoomUi() {
   $("zoomLevel").textContent = `${Math.round(camera.targetZoom * 100)}%`;
   $("zoomOutBtn").disabled = camera.targetZoom <= ZOOM_MIN + 1e-3;
@@ -290,113 +326,66 @@ function wallText(plane, at, text, font, color, { clip = null, offset = 0 } = {}
   return width;
 }
 
-function drawFloor() {
-  poly([{ x: 24, y: 24 }, { x: 536, y: 24 }, { x: 536, y: 536 }, { x: 24, y: 536 }], "#101c14", "#53694d");
-  poly([{ x: 30, y: 30 }, { x: 530, y: 30 }, { x: 530, y: 530 }, { x: 30, y: 530 }], "#17261b");
-  for (let x = 30; x < 530; x += 50) {
-    for (let y = 30; y < 530; y += 50) {
-      if (((x - 30) / 50 + (y - 30) / 50) % 2 === 0) {
-        poly([{ x, y }, { x: x + 50, y }, { x: x + 50, y: y + 50 }, { x, y: y + 50 }], "rgba(102,137,79,0.08)");
-      }
-    }
+// Tường sau chạy hết chiều dài mặt bằng chữ L: tường "back" (y = 24) và tường "left" (x = 24).
+function drawWalls() {
+  const EX = PLAN.outerMaxX, EY = PLAN.outerMaxY, IX = PLAN.maxX, IY = PLAN.maxY;
+  poly([{ x: 24, y: 24 }, { x: EX, y: 24 }, { x: EX, y: 24, z: 120 }, { x: 24, y: 24, z: 120 }], "#e6ecf5", "#b9c6dd");
+  poly([{ x: 30, y: 30, z: 8 }, { x: IX, y: 30, z: 8 }, { x: IX, y: 30, z: 116 }, { x: 30, y: 30, z: 116 }], "#f5f8fc");
+  poly([{ x: 24, y: 24 }, { x: 24, y: EY }, { x: 24, y: EY, z: 120 }, { x: 24, y: 24, z: 120 }], "#dbe3ef", "#b9c6dd");
+  poly([{ x: 30, y: 30, z: 8 }, { x: 30, y: IY, z: 8 }, { x: 30, y: IY, z: 116 }, { x: 30, y: 30, z: 116 }], "#edf2f8");
+  // Đường ghép tường nơi vách ngăn chạm tường sau
+  for (const w of WALLS.filter(w => w.a <= 24)) {
+    if (w.plane === "x") line({ x: w.at, y: 30, z: 8 }, { x: w.at, y: 30, z: 116 }, "rgba(120, 140, 180, 0.35)", 1.5);
+    else line({ x: 30, y: w.at, z: 8 }, { x: 30, y: w.at, z: 116 }, "rgba(120, 140, 180, 0.35)", 1.5);
   }
-  for (let x = 55; x < 536; x += 42) line({ x, y: 30 }, { x, y: 530 }, "rgba(128,164,112,0.12)");
-  for (let y = 55; y < 536; y += 42) {
-    line({ x: 30, y }, { x: 530, y }, "rgba(8,17,11,0.32)");
-    line({ x: 30, y: y + 1 }, { x: 530, y: y + 1 }, "rgba(128,164,112,0.07)");
-  }
-  poly([{ x: 228, y: 35 }, { x: 332, y: 35 }, { x: 455, y: 350 }, { x: 105, y: 350 }], "rgba(160,207,116,0.09)");
-  poly([{ x: 245, y: 42 }, { x: 315, y: 42 }, { x: 385, y: 255 }, { x: 175, y: 255 }], "rgba(188,224,141,0.07)");
-  poly([{ x: 24, y: 536 }, { x: 536, y: 536 }, { x: 536, y: 536, z: -14 }, { x: 24, y: 536, z: -14 }], "#1b2b1f", "#506744");
-  poly([{ x: 536, y: 24 }, { x: 536, y: 536 }, { x: 536, y: 536, z: -14 }, { x: 536, y: 24, z: -14 }], "#142118", "#506744");
-}
 
-// Bảng thị trường minh hoạ trên tường (dữ liệu ngẫu nhiên, mã hư cấu).
-const market = {
-  series: Array.from({ length: 16 }, () => 0),
-  tickers: [["AIX", 52.3], ["MNC", 18.7], ["ORB", 104.0], ["KTE", 33.1], ["LUM", 76.4], ["PXA", 12.9]],
-  lastStep: 0,
-  tickerOffset: 0,
-};
-(() => { let v = 50; market.series = market.series.map(() => (v = Math.max(20, Math.min(80, v + (Math.random() - 0.45) * 9)))); })();
-function stepMarket(tick) {
-  if (tick - market.lastStep < 50) return;
-  market.lastStep = tick;
-  const last = market.series[market.series.length - 1];
-  market.series.push(Math.max(20, Math.min(80, last + (Math.random() - 0.47) * 9)));
-  market.series.shift();
-  for (const t of market.tickers) t[1] = Math.max(1, t[1] * (1 + (Math.random() - 0.48) * 0.01));
-}
-
-function drawWalls(tick) {
-  poly([{ x: 24, y: 24 }, { x: 536, y: 24 }, { x: 536, y: 24, z: 120 }, { x: 24, y: 24, z: 120 }], "#24392a", "#58734b");
-  poly([{ x: 30, y: 30, z: 8 }, { x: 530, y: 30, z: 8 }, { x: 530, y: 30, z: 116 }, { x: 30, y: 30, z: 116 }], "#1d3022");
-  poly([{ x: 24, y: 24 }, { x: 24, y: 536 }, { x: 24, y: 536, z: 120 }, { x: 24, y: 24, z: 120 }], "#2b4230", "#5b7448");
-  poly([{ x: 30, y: 30, z: 8 }, { x: 30, y: 530, z: 8 }, { x: 30, y: 530, z: 116 }, { x: 30, y: 30, z: 116 }], "#22362a");
-
-  // Cửa sổ
   const W = (x0, x1, z0, z1, fill, stroke) =>
     poly([{ x: x0, y: 29, z: z0 }, { x: x1, y: 29, z: z0 }, { x: x1, y: 29, z: z1 }, { x: x0, y: 29, z: z1 }], fill, stroke);
-  W(205, 355, 49, 105, "#112018", "#718553");
-  W(211, 349, 55, 99, "#a8cf83", "#d0e7a2");
-  W(211, 349, 55, 62, "#d5eaa6");
-  W(278, 283, 55, 99, "#536a45");
-  W(211, 349, 76, 80, "#536a45");
-  poly([{ x: 205, y: 29, z: 46 }, { x: 355, y: 29, z: 46 }, { x: 355, y: 40, z: 46 }, { x: 205, y: 40, z: 46 }], "#607748", "#a0b877");
-
-  // Bảng thị trường (minh hoạ)
-  stepMarket(tick);
-  W(390, 528, 52, 108, "#28392c", "#6f8a5a");
-  W(393, 525, 63, 105, "#08110c");
-  wallText("back", { x: 396, y: 29, z: 98 }, t("wall.market"), "bold 6.5px \"Segoe UI\", sans-serif", "#9fd6a8");
-  const min = Math.min(...market.series), max = Math.max(...market.series);
-  const zOf = v => 68 + ((v - min) / Math.max(1, max - min)) * 22;
-  market.series.forEach((v, i) => {
-    if (i === 0) return;
-    const prev = market.series[i - 1];
-    const x = 398 + i * 7.8;
-    const up = v >= prev;
-    const z0 = zOf(Math.min(v, prev)), z1 = Math.max(zOf(Math.max(v, prev)), z0 + 1.2);
-    line({ x: x + 1.5, y: 29, z: z0 - 2 }, { x: x + 1.5, y: 29, z: z1 + 2 }, up ? "#5fbf74" : "#c8604f");
-    W(x, x + 3.2, z0, z1, up ? "#7fe39b" : "#f08a7a");
-  });
-  // Băng chạy mã cổ phiếu hư cấu
-  W(393, 525, 54, 62, "#050a07");
-  const tape = market.tickers.map(([s, p], i) => `${s} ${p.toFixed(1)} ${i % 3 === 1 ? "▼" : "▲"}`).join("   ·   ") + "   ·   ";
-  market.tickerOffset += 0.25;
-  const clipW = 132 * Math.hypot(ISO.kx, ISO.ky);
-  const tw = wallText("back", { x: 393, y: 29, z: 56 }, tape, "600 6px Consolas, monospace", "#f2c94c", { clip: { w: clipW, h: 7 }, offset: market.tickerOffset });
-  if (tw - market.tickerOffset < clipW) {
-    wallText("back", { x: 393, y: 29, z: 56 }, tape, "600 6px Consolas, monospace", "#f2c94c", { clip: { w: clipW, h: 7 }, offset: market.tickerOffset - tw });
-  }
-  if (market.tickerOffset > tw) market.tickerOffset -= tw;
-
-  // Biển tên công ty trên tường trái
   const P = (y0, y1, z0, z1, fill, stroke) =>
     poly([{ x: 31, y: y0, z: z0 }, { x: 31, y: y1, z: z0 }, { x: 31, y: y1, z: z1 }, { x: 31, y: y0, z: z1 }], fill, stroke);
-  P(222, 380, 64, 100, "#0e2617", "#75d899");
-  P(354, 374, 72, 94, "#2f8a55");
-  wallText("left", { x: 31, y: 372, z: 79 }, "MC", "800 10px \"Segoe UI\", sans-serif", "#04130b");
-  wallText("left", { x: 31, y: 346, z: 84 }, "MINI CAPITAL", "800 11px \"Segoe UI\", sans-serif", "#e9f6ec");
-  wallText("left", { x: 31, y: 346, z: 73 }, t("wall.tagline"), "600 5.6px \"Segoe UI\", sans-serif", "#9fd6a8");
 
-  // Đồng hồ treo tường – chạy theo giờ thật
-  const cx = 180, cz = 92, r = 11, Y = 29;
+  // Cửa sổ: plane "back" = tường sau (chạy theo x), "left" = tường trái (chạy theo y).
+  const windowAt = (plane, a0, a1) => {
+    const F = plane === "back" ? W : P;
+    F(a0, a1, 49, 105, "#d3dceb", "#9fb0d0");
+    F(a0 + 5, a1 - 5, 55, 99, "#6691ec", "#8db0fc");
+    F(a0 + 5, a1 - 5, 55, 62, "#94b5fc");
+    const n = Math.max(2, Math.round((a1 - a0) / 40));
+    for (let k = 1; k < n; k++) {
+      const m = a0 + 5 + ((a1 - a0 - 10) * k) / n;
+      F(m - 2, m + 2, 55, 99, "#f4f7fb");
+    }
+    F(a0 + 5, a1 - 5, 76, 80, "#f4f7fb");
+    const sill = plane === "back"
+      ? [{ x: a0, y: 29, z: 46 }, { x: a1, y: 29, z: 46 }, { x: a1, y: 40, z: 46 }, { x: a0, y: 40, z: 46 }]
+      : [{ x: 29, y: a0, z: 46 }, { x: 29, y: a1, z: 46 }, { x: 40, y: a1, z: 46 }, { x: 40, y: a0, z: 46 }];
+    poly(sill, "#ffffff", "#b9c6dd");
+  };
+  for (const w of WINDOWS) windowAt(w.plane, w.a0, w.a1);
+
+  // Biển số tầng – góc trong cùng của phòng nhân viên
+  P(36, 92, 56, 106, "#06132e", "#5288fb");
+  P(40, 88, 60, 102, "#07173b");
+  wallText("left", { x: 31, y: 86, z: 76 }, `${FLOOR}F`, "900 24px \"Segoe UI\", sans-serif", "#e4ebfb");
+  wallText("left", { x: 31, y: 86, z: 64 }, t("wall.floor", { n: FLOOR }), "800 6.5px \"Segoe UI\", sans-serif", "#5288fb");
+
+  // Đồng hồ treo tường – chạy theo giờ thật (phòng học lớn)
+  const cx = PLAN.maxX - 15, cz = 92, r = 11, Y = 29;
   const ring = k => Array.from({ length: 16 }, (_, i) => ({ x: cx + Math.cos(i / 16 * Math.PI * 2) * k, y: Y, z: cz + Math.sin(i / 16 * Math.PI * 2) * k }));
-  poly(ring(r + 2), "#344831");
-  poly(ring(r), "#e7efd3");
+  poly(ring(r + 2), "#293550");
+  poly(ring(r), "#c8d8fa");
   const now = new Date();
   const hand = (frac, len, color, width) => {
     const a = frac * Math.PI * 2;
     line({ x: cx, y: Y, z: cz }, { x: cx + Math.sin(a) * len, y: Y, z: cz + Math.cos(a) * len }, color, width);
   };
-  hand(((now.getHours() % 12) + now.getMinutes() / 60) / 12, 6, "#22301f", 2);
-  hand((now.getMinutes() + now.getSeconds() / 60) / 60, 8.5, "#22301f", 1.5);
+  hand(((now.getHours() % 12) + now.getMinutes() / 60) / 12, 6, "#192236", 2);
+  hand((now.getMinutes() + now.getSeconds() / 60) / 60, 8.5, "#192236", 1.5);
   hand(now.getSeconds() / 60, 9.5, "#c0463a", 1);
 
-  line({ x: 30, y: 31, z: 10 }, { x: 530, y: 31, z: 10 }, "#758d56", 3);
-  line({ x: 31, y: 30, z: 10 }, { x: 31, y: 530, z: 10 }, "#758d56", 3);
-  line({ x: 30, y: 30, z: 112 }, { x: 530, y: 30, z: 112 }, "#405a3c", 5);
+  line({ x: 30, y: 31, z: 10 }, { x: IX, y: 31, z: 10 }, "#c3cfe4", 3);
+  line({ x: 31, y: 30, z: 10 }, { x: 31, y: IY, z: 10 }, "#c3cfe4", 3);
+  line({ x: 30, y: 30, z: 112 }, { x: IX, y: 30, z: 112 }, "#dde5f1", 5);
 }
 
 // ===========================================================================
@@ -538,42 +527,102 @@ $("furnitureReset").addEventListener("click", () => {
   }
   editor.resetArmedUntil = 0;
   setLabel(btn, "reset", t("furn.reset"));
-  layout = defaultLayout();
+  layout = defaultFloorLayout(FLOOR);
   editor.selectedId = null;
   editor.placing = null;
   setHint(t("furn.restored"));
   commitLayout();
 });
+// Bàn mặc định của ai: chọn người -> bàn này thành bàn mặc định của họ (người đang giữ bàn này đổi sang bàn cũ của người kia).
+const homeOwnerOf = item => team.find(r => r.homeDesk === item.id) || null;
+// ---- Lưu / mở file: bố cục + đồ đạc + hồ sơ nhân viên ----
+$("layoutExport").addEventListener("click", () => {
+  const data = {
+    app: "gki-office", kind: "layout", version: 1, planVersion: PLAN_VERSION, savedAt: new Date().toISOString(),
+    layout: (FLOOR === 9 ? layout : layouts[9]).map(({ _cache, ...rest }) => rest),
+    floors: Object.fromEntries(FLOOR_IDS.filter(f => f !== 9).map(f => [f, (f === FLOOR ? layout : layouts[f]).map(({ _cache, ...rest }) => rest)])),
+    team,
+  };
+  const d = new Date(), pad = n => String(n).padStart(2, "0");
+  const name = `gki-van-phong-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  toast(t("layout.exported", { name }), 4500, "save");
+});
+$("layoutImport").addEventListener("click", () => $("layoutFile").click());
+$("layoutFile").addEventListener("change", async event => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    const items = cleanLayout(data?.layout, Number(data?.planVersion) || 1);
+    if (!items.length) throw new Error("no layout");
+    if (net.busy || isDemoRunning() || lessonState().active) { toast(t("staff.busy"), 3500, "alert"); return; }
+    layouts[9] = items;
+    for (const f of FLOOR_IDS.filter(f => f !== 9)) {
+      layouts[f] = cleanLayout(data?.floors?.[f], PLAN_VERSION);
+      store.set(FLOOR_LAYOUT_KEYS[f], layouts[f]);
+    }
+    store.set(FLOOR_LAYOUT_KEYS[9], items);
+    store.set(PLAN_VER_KEY, PLAN_VERSION);
+    layout = layouts[FLOOR];
+    editor.selectedId = null;
+    const imported = sanitizeTeam(data.team);
+    if (imported) team = imported;
+    commitLayout();
+    applyTeam();
+    seatEveryone();
+    toast(t("layout.imported", { n: items.length }), 3500, "check");
+    log(t("layout.imported", { n: items.length }), "job");
+  } catch {
+    toast(t("layout.importFail"), 4500, "alert");
+  }
+});
+
 $("furnitureAssignment").addEventListener("change", event => {
   const item = selectedItem();
-  if (!item || item.type !== "desk") return;
+  if (!item || !isWorkDesk(item)) return;
   const who = event.target.value;
-  for (const other of layout) if (other.type === "desk" && other.assignedTo === who && who) other.assignedTo = "";
-  item.assignedTo = who;
-  setHint(who ? t("furn.assigned", { title: titles()[who] }) : t("furn.unassigned"));
-  commitLayout();
+  const prev = homeOwnerOf(item);
+  const rec = recOf(who);
+  if (prev && prev !== rec) prev.homeDesk = rec ? rec.homeDesk : "";
+  if (rec) rec.homeDesk = item.id;
+  setHint(rec ? t("furn.assigned", { title: nameOf(rec.id) }) : t("furn.unassigned"));
+  applyTeam();
+  renderEditor();
 });
 function renderAssignmentOptions() {
   const select = $("furnitureAssignment");
   const value = select.value;
-  select.replaceChildren(new Option(t("furn.emptyDesk"), ""), ...ORDER.map(id => new Option(titles()[id], id)));
+  select.replaceChildren(new Option(t("furn.emptyDesk"), ""), ...team.map(r => new Option(nameOf(r.id), r.id)));
   select.value = value;
 }
-renderAssignmentOptions();
 
 function layoutWarnings() {
   const warnings = [];
-  for (const id of ORDER) {
-    const desk = layout.find(it => it.type === "desk" && it.assignedTo === id);
-    if (!desk) warnings.push(t("furn.warn.noDesk", { title: titles()[id] }));
-    else if (!reachable(staff[id], seatPoint(desk))) warnings.push(t("furn.warn.blocked", { title: titles()[id] }));
+  for (const r of team) {
+    // Bàn có thể ở tầng khác: chỉ báo "chưa có bàn" khi không tầng nào có; lối đi tới ghế chỉ xét ở tầng đang xem.
+    if (!deskItems().some(it => it.id === r.homeDesk)) { warnings.push(t("furn.warn.noDesk", { title: nameOf(r.id) })); continue; }
+    const desk = layout.find(it => it.id === r.homeDesk && isWorkDesk(it));
+    if (desk && staff[r.id] && !reachable(staff[r.id], seatPoint(desk))) warnings.push(t("furn.warn.blocked", { title: nameOf(r.id) }));
   }
-  const has = t => layout.some(it => it.type === t);
-  if (!has("whiteboard")) warnings.push(t("furn.warn.noWhiteboard"));
-  if (!has("bookshelf")) warnings.push(t("furn.warn.noBookshelf"));
-  if (!has("printer")) warnings.push(t("furn.warn.noPrinter"));
-  if (!has("cabinet")) warnings.push(t("furn.warn.noCabinet"));
-  if (!has("trash")) warnings.push(t("furn.warn.noTrash"));
+  // Bảng trắng, kệ sách, máy in, tủ hồ sơ, thùng rác phục vụ hoạt động ở tầng 9 (Giám đốc, Trợ giảng chính) – tầng khác không cần.
+  if (FLOOR === 9) {
+    const has = t => layout.some(it => it.type === t);
+    if (!has("whiteboard")) warnings.push(t("furn.warn.noWhiteboard"));
+    if (!has("bookshelf")) warnings.push(t("furn.warn.noBookshelf"));
+    if (!has("printer")) warnings.push(t("furn.warn.noPrinter"));
+    if (!has("cabinet")) warnings.push(t("furn.warn.noCabinet"));
+    if (!has("trash")) warnings.push(t("furn.warn.noTrash"));
+  }
+  for (const d of floorDesks()) {
+    if (chairBlocked(d)) warnings.push(t("furn.warn.chairWall", { label: deskLabel(d) }));
+  }
   return warnings;
 }
 
@@ -598,8 +647,8 @@ function renderEditor() {
   setLabel($("furnitureSelection"), item ? `f-${item.type}` : null, item
     ? t("furn.selected", { label: t(`furn.item.${item.type}`), deg: rot(item) * 90 })
     : editor.placing ? t("furn.ready", { label: t(`furn.item.${editor.placing}`), deg: editor.placingRotation * 90 }) : t("furn.none"));
-  $("furnitureAssignmentWrap").hidden = !item || item.type !== "desk";
-  if (item && item.type === "desk") $("furnitureAssignment").value = item.assignedTo || "";
+  $("furnitureAssignmentWrap").hidden = !item || !isWorkDesk(item);
+  if (item && isWorkDesk(item)) $("furnitureAssignment").value = homeOwnerOf(item)?.id || "";
   canvas.classList.toggle("is-placing", !!editor.placing);
   const warnings = layoutWarnings();
   $("furnitureWarnings").replaceChildren(...warnings.map(w => Object.assign(document.createElement("li"), { textContent: w })));
@@ -615,8 +664,8 @@ function render() {
   const tick = getTick();
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   const g = ctx.createRadialGradient(canvas.width / 2, canvas.height * 0.45, 0, canvas.width / 2, canvas.height * 0.45, Math.max(canvas.width, canvas.height) * 0.7);
-  g.addColorStop(0, "#0f1f15");
-  g.addColorStop(1, "#040806");
+  g.addColorStop(0, "#3561c2");
+  g.addColorStop(1, "#244a9c");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   const s = view.scale * camera.zoom;
@@ -624,18 +673,17 @@ function render() {
     view.dpr * (view.cx - camera.focus.x * s), view.dpr * (view.cy - camera.focus.y * s));
 
   drawSkyline(ctx, tick); // phong cảnh thành phố bên ngoài (đổi theo ngôn ngữ)
-  drawFloor();
-  drawWalls(tick);
+  drawFloorPlan();
+  drawWalls();
 
   if (editor.open) {
-    for (let v = 30; v <= 530; v += 50) {
-      line({ x: v, y: 30 }, { x: v, y: 530 }, "rgba(168,239,155,0.10)");
-      line({ x: 30, y: v }, { x: 530, y: v }, "rgba(168,239,155,0.10)");
-    }
+    for (let v = PLAN.min; v <= PLAN.maxX; v += 50) line({ x: v, y: PLAN.min }, { x: v, y: v <= PLAN.notchX ? PLAN.maxY : PLAN.notchY }, "rgba(142, 177, 252, 0.10)");
+    for (let v = PLAN.min; v <= PLAN.maxY; v += 50) line({ x: PLAN.min, y: v }, { x: v <= PLAN.notchY ? PLAN.maxX : PLAN.notchX, y: v }, "rgba(142, 177, 252, 0.10)");
   }
 
-  if (onboarding.greeting) lookAt(staff.manager, ["analyst", "quant", "risk"]);
+  if (onboarding.greeting && staff.manager) lookAt(staff.manager);
   drawOrder = isoSort([
+    ...wallDrawables(),
     ...sceneDrawables(layout),
     ...agentDrawables(a => drawAgent(a, project(a.x, a.y), tick)),
   ]);
@@ -652,7 +700,7 @@ function render() {
   if (editor.open) drawEditorOverlay();
 
   const taken = [];
-  [...Object.values(staff)]
+  visibleAgents().filter(a => !a.hidden && (a.name || bubbleOf(a)))
     .sort((a, b) => b.x + b.y - (a.x + a.y))
     .forEach(a => drawOverlay(a, project(a.x, a.y), bubbleOf(a), taken));
 }
@@ -660,15 +708,17 @@ function render() {
 function drawEditorOverlay() {
   const sel = selectedItem();
   if (sel) {
-    floorRect(footprint(sel), "rgba(168,239,155,0.10)", "#a8ef9b", [5, 4]);
-    if (sel.type === "desk") {
+    floorRect(footprint(sel), "rgba(142, 177, 252, 0.10)", "#8eb1fc", [5, 4]);
+    if (isWorkDesk(sel)) {
       const seat = project(seatPoint(sel).x, seatPoint(sel).y);
-      ctx.fillStyle = sel.assignedTo ? roleColor(sel.assignedTo) : "#a8ef9b";
+      const owner = homeOwnerOf(sel);
+      ctx.fillStyle = owner ? roleColor(owner.id) : "#8eb1fc";
       ctx.beginPath(); ctx.arc(seat.x, seat.y, 4, 0, Math.PI * 2); ctx.fill();
     }
   }
-  for (const desk of layout.filter(it => it.type === "desk")) {
-    const owner = desk.assignedTo && staff[desk.assignedTo];
+  for (const desk of floorDesks()) {
+    const rec = homeOwnerOf(desk);
+    const owner = rec && staff[rec.id];
     const seat = seatPoint(desk);
     if (owner && Math.hypot(owner.x - seat.x, owner.y - seat.y) < 20) continue;
     const p = project(desk.x, desk.y, 62);
@@ -676,16 +726,17 @@ function drawEditorOverlay() {
     ctx.font = "600 9px \"Segoe UI\", system-ui, sans-serif";
     ctx.textAlign = "center";
     const w = ctx.measureText(label).width + 10;
-    ctx.fillStyle = "rgba(5,14,9,.8)";
+    ctx.fillStyle = "rgba(255, 255, 255, .92)";
     ctx.beginPath(); ctx.roundRect(p.x - w / 2, p.y - 11, w, 13, 6); ctx.fill();
-    ctx.fillStyle = owner ? roleColor(desk.assignedTo) : "#9ab6a0";
+    ctx.fillStyle = owner ? roleColor(rec.id) : "#5a6a88";
     ctx.fillText(label, p.x, p.y - 1.5);
   }
   if (editor.placing && editor.hover) {
     Object.assign(ghost, { type: editor.placing, rotation: editor.placingRotation, x: snap(editor.hover.x), y: snap(editor.hover.y) });
     const ok = validAt(ghost, ghost);
-    floorRect(footprint(ghost), ok ? "rgba(117,216,153,0.18)" : "rgba(224,103,90,0.25)", ok ? "#75d899" : "#e0675a", [4, 3]);
-    drawItem(ghost, 0.6);
+    floorRect(footprint(ghost), ok ? "rgba(82, 136, 251, 0.18)" : "rgba(224,103,90,0.25)", ok ? "#5288fb" : "#e0675a", [4, 3]);
+    ghost._cache = null;
+    drawItem(ghost, 0.6, true);
   }
 }
 
@@ -706,13 +757,19 @@ function frame(now) {
 // Khung giao diện: menu, khung thu gọn, đội ngũ, nhật ký, báo cáo, thông báo
 // ===========================================================================
 const UI_KEY = "ai-office-ui";
-const ui = store.get(UI_KEY, { report: window.innerWidth > 1000, side: window.innerWidth > 1000 });
+const ui = { report: window.innerWidth > 1000, side: window.innerWidth > 1000, task: true, ...store.get(UI_KEY, {}) };
 
 function applyPanels() {
   $("reportPanel").hidden = !ui.report;
   $("sidePanel").hidden = !ui.side;
   $("reportTab").hidden = ui.report;
   $("sideTab").hidden = ui.side;
+  // Khung giao việc ⇄ nút giữa cạnh dưới: đổi lớp CSS (có hiệu ứng) thay vì ẩn/hiện tức thì.
+  $("taskbar").classList.toggle("folded", !ui.task);
+  $("taskTab").classList.toggle("folded", ui.task);
+  $("taskbar").inert = !ui.task;
+  $("taskTab").inert = ui.task;
+  renderTaskTab();
   $("showReport").checked = ui.report;
   $("showSide").checked = ui.side;
   store.set(UI_KEY, ui);
@@ -725,6 +782,13 @@ document.querySelectorAll("[data-collapse]").forEach(btn => btn.addEventListener
 }));
 $("reportTab").addEventListener("click", () => { ui.report = true; applyPanels(); });
 $("sideTab").addEventListener("click", () => { ui.side = true; applyPanels(); });
+// Khung giao việc thu gọn thành nút nhỏ ở góc dưới; đang có nhiệm vụ thì nút quay vòng.
+function renderTaskTab() {
+  const busy = net.busy || isDemoRunning() || lessonState().active;
+  setLabel($("taskTab"), busy ? "spinner" : "send", busy ? t("task.busy") : t("task.send"));
+  $("taskTab").classList.toggle("busy", busy);
+}
+$("taskTab").addEventListener("click", () => { ui.task = true; applyPanels(); $("taskInput").focus({ preventScroll: true }); });
 $("showReport").addEventListener("change", e => { ui.report = e.target.checked; if (!ui.report) setExpanded(false); applyPanels(); });
 $("showSide").addEventListener("change", e => { ui.side = e.target.checked; applyPanels(); });
 
@@ -741,6 +805,7 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape" && !$("cabinet").hidden) { closeCabinet(); return; }
   if (event.key === "Escape" && !$("printer").hidden) { closePrinter(); return; }
   if (event.key === "Escape" && !$("board").hidden) { closeBoard(); return; }
+  if (event.key === "Escape" && !$("staffModal").hidden) { closeStaff(); return; }
   if (event.key === "Escape" && reportView.expanded) { setExpanded(false); return; }
   const tag = document.activeElement?.tagName;
   if (tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT") return;
@@ -764,18 +829,245 @@ function toast(text, ms = 3500, iconName = null) {
 
 
 function renderTeam() {
-  $("teamList").replaceChildren(...ORDER.map(id => {
-    const a = staff[id];
+  $("teamList").replaceChildren(...team.map(r => {
+    const a = staff[r.id];
+    const status = a?.serverStatus || "idle";
     const li = document.createElement("li");
-    li.className = `team-row status-${a.serverStatus}`;
+    li.className = `team-row status-${status}`;
+    li.tabIndex = 0;
+    li.setAttribute("role", "button");
+    li.title = t("staff.openHint");
     li.innerHTML = `<span class="team-dot"></span><div class="team-info"><strong></strong><small></small></div><span class="pill"></span>`;
-    li.querySelector(".team-dot").style.background = roleColor(id);
-    li.querySelector("strong").textContent = titles()[id];
-    li.querySelector("small").textContent = a.serverStatus !== "idle" && a.serverMessage ? a.serverMessage : duties()[id];
-    li.querySelector(".pill").textContent = t(`team.status.${a.serverStatus}`);
+    li.querySelector(".team-dot").style.background = roleColor(r.id);
+    li.querySelector("strong").textContent = nameOf(r.id);
+    li.querySelector("small").textContent = status !== "idle" && a?.serverMessage ? a.serverMessage : `${roleTitle(r.role)} · ${roleDuty(r.role)}`;
+    li.querySelector(".pill").textContent = t(`team.status.${status}`);
+    const open = () => openStaff(r.id);
+    li.addEventListener("click", open);
+    li.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+    return li;
+  }));
+  setLabel($("workModeBtn"), "f-desk", t("work.mode"));
+  $("workModeBtn").setAttribute("aria-pressed", String(flags.workMode));
+  $("workModeBtn").classList.toggle("on", flags.workMode);
+  setLabel($("manageStaff"), "plus", t("staff.manage"));
+}
+
+// ---- Chế độ làm việc: mọi người sang "bàn làm việc" ----
+$("workModeBtn").addEventListener("click", () => {
+  setWorkMode(!flags.workMode);
+  store.set("ai-office-workmode", flags.workMode);
+  toast(t(flags.workMode ? "work.on" : "work.off"), 3000, "f-desk");
+  renderTeam();
+});
+
+// ---- Hồ sơ nhân viên: tên, vai trò, bàn, ngoại hình (xem trước trực tiếp) ----
+const staffUi = { id: DIRECTOR_ID, turn: 0, raf: 0 };
+const PREVIEW_FACES = ["SE", "S", "SW", "W", "NW", "N", "NE", "E"];
+const jobRunning = () => net.busy || isDemoRunning() || lessonState().active;
+
+function deskLabel(item) {
+  const fl = deskFloor(item.id);
+  const same = deskItems().filter(d => d.type === item.type && deskFloor(d.id) === fl);
+  const room = roomAt(item.x, item.y);
+  const owner = homeOwnerOf(item);
+  return `${t("floor.name", { n: fl })} · ${t(`furn.item.${item.type}`)} ${same.indexOf(item) + 1}${fl === FLOOR && room ? ` · ${t(`room.${room}`)}` : ""}${owner ? ` (${t("staff.deskTaken", { name: nameOf(owner.id) })})` : ""}`;
+}
+
+function openStaff(id = staffUi.id) {
+  if (!$("pledge").hidden) return;
+  staffUi.id = recOf(id) ? id : DIRECTOR_ID;
+  renderStaffEditor();
+  $("staffModal").hidden = false;
+  cancelAnimationFrame(staffUi.raf);
+  const loop = () => { if ($("staffModal").hidden) return; drawPreview(); staffUi.raf = requestAnimationFrame(loop); };
+  loop();
+  $("staffClose").focus();
+}
+function closeStaff() { $("staffModal").hidden = true; cancelAnimationFrame(staffUi.raf); }
+$("manageStaff").addEventListener("click", () => openStaff());
+$("staffClose").addEventListener("click", closeStaff);
+$("staffModal").addEventListener("click", event => { if (event.target === $("staffModal")) closeStaff(); });
+
+// Nhân vật xem trước: dùng đúng hàm vẽ trong văn phòng, phóng to vừa khung.
+const previewAgent = { id: "preview", look: null, facing: "SE", moving: false, working: false, talking: false, seatBlend: 0, lift: 0, holding: null, animationSeed: 3 };
+function drawPreview() {
+  const c = $("staffPreview");
+  const rec = recOf(staffUi.id);
+  if (!c || !rec) return;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const W = c.clientWidth || 140, H = c.clientHeight || 170;
+  if (c.width !== Math.round(W * dpr)) { c.width = Math.round(W * dpr); c.height = Math.round(H * dpr); }
+  const pc = c.getContext("2d");
+  pc.setTransform(1, 0, 0, 1, 0, 0);
+  pc.clearRect(0, 0, c.width, c.height);
+  const k = dpr * Math.min(1.75, (H - 24) / 92); // nhân vật cao ~92 đơn vị (kể cả tóc búi)
+  pc.setTransform(k, 0, 0, k, (W / 2) * dpr, (H - 14) * dpr);
+  Object.assign(previewAgent, { look: rec.look, facing: PREVIEW_FACES[staffUi.turn % 8] });
+  bindContext(pc);
+  try { drawAgent(previewAgent, { x: 0, y: 0 }, getTick()); } finally { bindContext(ctx); }
+}
+$("staffTurn").addEventListener("click", () => { staffUi.turn++; });
+
+function swatches(container, colors, value, onPick, label) {
+  container.replaceChildren(...colors.map(col => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `swatch${col.toLowerCase() === String(value).toLowerCase() ? " on" : ""}`;
+    b.style.background = col;
+    b.setAttribute("aria-label", `${label} ${col}`);
+    b.setAttribute("aria-pressed", String(col.toLowerCase() === String(value).toLowerCase()));
+    b.addEventListener("click", () => onPick(col));
+    return b;
+  }));
+}
+
+function updateRec(fn, { rerender = true } = {}) {
+  const rec = recOf(staffUi.id);
+  if (!rec) return;
+  fn(rec);
+  applyTeam();
+  if (rerender) renderStaffEditor();
+}
+
+function renderStaffList() {
+  $("staffList").replaceChildren(...team.map(r => {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `staff-pick${r.id === staffUi.id ? " on" : ""}`;
+    b.innerHTML = `<span class="team-dot"></span><span class="nm"></span><small></small>`;
+    b.querySelector(".team-dot").style.background = roleColor(r.id);
+    b.querySelector(".nm").textContent = nameOf(r.id);
+    b.querySelector("small").textContent = roleTitle(r.role);
+    b.addEventListener("click", () => { staffUi.id = r.id; renderStaffEditor(); });
+    li.append(b);
     return li;
   }));
 }
+
+function renderStaffEditor() {
+  const rec = recOf(staffUi.id);
+  if (!rec) return;
+  renderStaffList();
+  setLabel($("staffAdd"), "plus", t("staff.add"));
+  $("staffAdd").disabled = team.length >= MAX_STAFF;
+  $("staffAdd").title = team.length >= MAX_STAFF ? t("staff.max", { n: MAX_STAFF }) : "";
+
+  // Tên + vai trò
+  const nameInput = $("staffName");
+  if (document.activeElement !== nameInput) nameInput.value = rec.name || "";
+  nameInput.placeholder = displayName({ ...rec, name: "" }, team);
+  const gSel = $("staffGender");
+  gSel.replaceChildren(...GENDERS.map(g => new Option(t(`gender.${g}`), g)));
+  gSel.value = rec.look.gender === "female" ? "female" : "male";
+  const roleSel = $("staffRole");
+  const isDirector = rec.id === DIRECTOR_ID;
+  roleSel.replaceChildren(...(isDirector ? ["director"] : STAFF_ROLES).map(r => new Option(roleTitle(r), r)));
+  roleSel.value = rec.role;
+  roleSel.disabled = isDirector || jobRunning();
+  $("staffRoleHint").textContent = isDirector ? t("staff.directorRole") : roleDuty(rec.role);
+
+  // Bàn
+  const desks = deskItems();
+  const homeSel = $("staffHome"), workSel = $("staffWork");
+  homeSel.replaceChildren(new Option(t("staff.noDesk"), ""), ...desks.map(d => new Option(deskLabel(d), d.id)));
+  homeSel.value = desks.some(d => d.id === rec.homeDesk) ? rec.homeDesk : "";
+  workSel.replaceChildren(new Option(t("staff.sameDesk"), ""), ...desks.map(d => new Option(deskLabel(d), d.id)));
+  workSel.value = desks.some(d => d.id === rec.workDesk) ? rec.workDesk : "";
+
+  // Ngoại hình
+  const L = rec.look;
+  swatches($("staffSkin"), SKINS, L.skin, col => updateRec(r => { r.look.skin = col; }), t("staff.skin"));
+  swatches($("staffHair"), HAIRS, L.hair, col => updateRec(r => { r.look.hair = col; }), t("staff.hair"));
+  const hs = $("staffHairStyle");
+  hs.replaceChildren(...HAIR_STYLES.map(s => new Option(t(`hair.${s}`), s)));
+  hs.value = L.hairStyle;
+  const of = $("staffOutfit");
+  of.replaceChildren(...OUTFITS.map(s => new Option(t(`outfit.${s}`), s)));
+  of.value = L.outfit;
+  const bt = $("staffBottom");
+  bt.replaceChildren(...BOTTOMS.map(b => new Option(t(`bottom.${b}`), b)));
+  bt.value = L.bottom === "skirt" ? "skirt" : "pants";
+  for (const k of ["jacket", "shirt", "accent", "pants"]) $(`staffC-${k}`).value = L[k];
+  $("staffAcc").replaceChildren(...ACCESSORIES.map(a => {
+    const lab = document.createElement("label");
+    lab.className = "check chip";
+    lab.innerHTML = `<input type="checkbox"> <span></span>`;
+    lab.querySelector("input").checked = !!L[a];
+    lab.querySelector("span").textContent = t(`acc.${a}`);
+    lab.querySelector("input").addEventListener("change", e => updateRec(r => { r.look[a] = e.target.checked; }));
+    return lab;
+  }));
+
+  const del = $("staffDelete");
+  del.hidden = isDirector;
+  if (del.dataset.armed !== "1") setLabel(del, "trash", t("staff.delete"));
+  setLabel($("staffRandom"), "reset", t("staff.random"));
+  setLabel($("staffTurn"), "rotate", t("staff.turn"));
+}
+
+$("staffName").addEventListener("input", event => {
+  updateRec(r => { r.name = event.target.value.slice(0, 24); }, { rerender: false });
+  renderStaffList();
+});
+$("staffName").addEventListener("change", () => renderStaffEditor());
+$("staffRole").addEventListener("change", event => {
+  if (jobRunning()) { toast(t("staff.busy"), 3000, "alert"); renderStaffEditor(); return; }
+  updateRec(r => { if (r.id !== DIRECTOR_ID && STAFF_ROLES.includes(event.target.value)) r.role = event.target.value; });
+});
+// Đổi giới tính: tự chỉnh những chi tiết đi kèm (vẫn sửa lại được bằng tay).
+$("staffGender").addEventListener("change", event => updateRec(r => {
+  const L = r.look;
+  L.gender = event.target.value;
+  if (L.gender === "female") {
+    L.beard = false;
+    if (["short", "swept", "bald"].includes(L.hairStyle)) L.hairStyle = "long";
+    L.bottom = "skirt";
+  } else {
+    if (["long", "bun"].includes(L.hairStyle)) L.hairStyle = "short";
+    L.bottom = "pants";
+    L.earrings = false;
+  }
+}));
+$("staffBottom").addEventListener("change", event => updateRec(r => { r.look.bottom = event.target.value; }));
+$("staffHome").addEventListener("change", event => updateRec(r => { r.homeDesk = event.target.value; }));
+$("staffWork").addEventListener("change", event => updateRec(r => { r.workDesk = event.target.value; }));
+$("staffHairStyle").addEventListener("change", event => updateRec(r => { r.look.hairStyle = event.target.value; }));
+$("staffOutfit").addEventListener("change", event => updateRec(r => { r.look.outfit = event.target.value; }));
+for (const k of ["jacket", "shirt", "accent", "pants"]) {
+  $(`staffC-${k}`).addEventListener("input", event => updateRec(r => { r.look[k] = event.target.value; }, { rerender: false }));
+}
+$("staffRandom").addEventListener("click", () => updateRec(r => { r.look = randomLook(r.look.gender === "female" ? "female" : "male"); }));
+$("staffAdd").addEventListener("click", () => {
+  if (team.length >= MAX_STAFF) { toast(t("staff.max", { n: MAX_STAFF }), 3000, "alert"); return; }
+  const used = new Set(team.map(r => r.homeDesk).filter(Boolean));
+  const free = deskItems().find(d => !used.has(d.id));
+  const counts = Object.fromEntries(STAFF_ROLES.map(r => [r, team.filter(x => x.role === r).length]));
+  const role = STAFF_ROLES.slice().sort((a, b) => counts[a] - counts[b])[0];
+  const rec = { id: newMemberId(team), role, name: "", homeDesk: free?.id || "", workDesk: "", look: randomLook() };
+  team.push(rec);
+  staffUi.id = rec.id;
+  applyTeam();
+  renderStaffEditor();
+  toast(t("staff.added", { name: nameOf(rec.id) }), 3500, "smile");
+  if (!free) toast(t("staff.noDeskWarn"), 4500, "alert");
+  log(t("staff.added", { name: nameOf(rec.id) }), "job");
+  $("staffName").focus();
+});
+$("staffDelete").addEventListener("click", () => {
+  const rec = recOf(staffUi.id);
+  if (!rec || rec.id === DIRECTOR_ID) return;
+  if (jobRunning()) { toast(t("staff.busy"), 3000, "alert"); return; }
+  armOnce($("staffDelete"), t("staff.confirm"), () => {
+    const name = nameOf(rec.id);
+    team = team.filter(r => r !== rec);
+    staffUi.id = DIRECTOR_ID;
+    applyTeam();
+    renderStaffEditor();
+    toast(t("staff.deleted", { name }), 3000, "trash");
+  });
+});
 
 function log(text, tone = "") {
   const list = $("activityLog");
@@ -884,7 +1176,9 @@ $("reportExpand").addEventListener("click", () => setExpanded(!reportView.expand
 $("reportBackdrop").addEventListener("click", () => setExpanded(false));
 
 // Các cảnh của Giám đốc không chen ngang màn chào khách.
-const managerFree = () => !onboarding.greeting;
+// Việc vặt do Trợ giảng chính làm (choreAgent); không chen ngang màn chào khách, người đang đứng lớp thì không rời lớp.
+const managerFree = () => { const a = choreAgent(); return !!a && !onboarding.greeting && !a.lesson; };
+const choreName = () => (choreAgent() ? nameOf(choreAgent().id) : "");
 
 function saveReport() {
   if (!report.id || archived(report.id)) return;
@@ -1026,7 +1320,7 @@ $("printerGo").addEventListener("click", () => {
   if (printing) { toast(t("printer.busy"), 2500, "alert"); return; }
   printing = true;
   closePrinter();
-  toast(t("printer.toast", { k: entries.length }), 3000, "f-printer");
+  toast(t("printer.toast", { k: entries.length, name: choreName() }), 3000, "f-printer");
   let done = false;
   const go = () => {
     if (done) return;
@@ -1040,11 +1334,9 @@ $("printerGo").addEventListener("click", () => {
 });
 
 // ---- Bảng phân công: nhiệm vụ hiện tại + việc Giám đốc giao cho từng người (bấm vào bảng trắng) ----
-const BOARD_KEY = "ai-office-board";
-const TASK_ORDER = ["analyst", "quant", "risk", "manager"];
-const TASK_TOOLS = { analyst: "board.tool.full", quant: "board.tool.full", risk: "board.tool.price", manager: null };
+const BOARD_KEY = "ai-office-board-v2";
 let board = store.get(BOARD_KEY, null);
-if (!board || typeof board !== "object" || !board.tasks) board = null;
+if (!board || typeof board !== "object" || !board.tasks || !Array.isArray(board.order)) board = null;
 else if (board.state === "planning" || board.state === "running") boardStopped(); // tải lại trang giữa chừng
 let boardTimer = 0;
 
@@ -1062,12 +1354,18 @@ function boardChanged() {
 }
 function boardStart(msg) {
   const demo = isDemoRunning();
+  const job = net.pendingJob || { kind: msg.kind || "course", members: [], directorId: DIRECTOR_ID, lesson: null };
+  // Giám đốc đứng lớp: một dòng cho Giám đốc (giảng + duyệt) ở đầu bảng.
+  const directorTeaches = job.kind === "lesson" && job.lesson?.teacher === job.directorId;
+  const order = directorTeaches ? [job.directorId, ...job.members.map(m => m.id)] : [...job.members.map(m => m.id), job.directorId];
   board = {
     prompt: net.lastPrompt || String(msg.prompt || ""),
     client: client ? clientName(client.name) : "",
     models: demo ? null : (net.pendingModels || null),
+    kind: job.kind, lesson: job.lesson, order,
+    people: Object.fromEntries([...job.members, { id: job.directorId, role: "director" }].map(m => [m.id, { role: m.role, name: nameOf(m.id) }])),
     demo, startedAt: Date.now(), endedAt: 0, state: "planning", error: "",
-    tasks: Object.fromEntries(TASK_ORDER.map(id => [id, { state: "waiting", startedAt: 0, endedAt: 0, tools: 0, note: "", error: "" }])),
+    tasks: Object.fromEntries(order.map(id => [id, { state: "waiting", startedAt: 0, endedAt: 0, note: "", error: "" }])),
   };
   boardChanged();
 }
@@ -1114,6 +1412,8 @@ function renderBoard() {
   }
   const elapsed = (board.endedAt || Date.now()) - board.startedAt;
   const facts = [
+    `<span>${icon("report")}${escHtml(t("board.kind", { x: kindName(board.kind) }))}</span>`,
+    board.lesson && `<span>${icon("team")}${escHtml(t("board.lesson", { room: t(`room.${board.lesson.room}`), n: board.lesson.students }))}</span>`,
     board.client && `<span>${icon("user")}${escHtml(board.client)}</span>`,
     `<span>${icon("clock")}${escHtml(t("board.started", { time: fmtDateTime(new Date(board.startedAt)) }))}</span>`,
     `<span>${escHtml(t("board.elapsed", { t: fmtDur(elapsed) }))}</span>`,
@@ -1121,28 +1421,29 @@ function renderBoard() {
       : board.models ? `<span>${icon("monitor")}${escHtml(board.models.join(" + "))}</span>` : "",
     `<span class="board-chip ${board.state}">${escHtml(t(`board.state.${board.state}`))}</span>`,
   ].filter(Boolean).join("");
-  const names = titles();
-  const tasks = TASK_ORDER.map((id, i) => {
+  const who = id => board.people[id] || { role: recOf(id)?.role || "ta", name: nameOf(id) };
+  const tasks = board.order.map((id, i) => {
     const task = board.tasks[id];
-    const prev = TASK_ORDER.slice(0, i).map(p => names[p]).join(", ");
-    const tool = TASK_TOOLS[id];
+    const p = who(id);
+    const prev = board.order.slice(0, i).map(x => who(x).name).join(", ");
+    const part = board.kind === "lesson" ? (board.lesson?.teacher === id ? "teacher" : p.role === "director" ? null : "assistant") : null;
     const meta = [
-      `<span>${icon("report")}${escHtml(t("board.deliver", { x: t(`board.out.${id}`) }))}</span>`,
-      `<span>${icon("eye")}${escHtml(tool ? t("board.tools", { x: t(tool) }) : t("board.noTools"))}</span>`,
+      `<span>${icon("report")}${escHtml(p.role === "director" ? t("board.deliver", { x: kindDoc(board.kind) }) : roleTitle(p.role))}</span>`,
+      part && `<span>${icon("team")}${escHtml(t(part === "teacher" ? "board.teacherTag" : "board.assistantTag"))}</span>`,
       prev && `<span>${icon("arrow")}${escHtml(t("board.inputs", { x: prev }))}</span>`,
     ].filter(Boolean).join("");
     const when = [
       task.state === "active" && task.startedAt && t("board.since", { time: fmtTime(new Date(task.startedAt)) }),
       task.endedAt && task.startedAt && t("board.took", { t: fmtDur(task.endedAt - task.startedAt) }),
-      task.tools && t("board.lookups", { n: task.tools }),
     ].filter(Boolean).join(" · ");
-    const name = staff[id]?.name && staff[id].name !== names[id] ? `<span class="who">· ${escHtml(staff[id].name)}</span>` : "";
-    return `<li class="board-task ${task.state}" style="--role:${roleColor(id)}">
+    return `<li class="board-task ${task.state}" style="--role:${ROLE_COLOR[p.role] || "#8eb1fc"}">
       <div class="num">${i + 1}</div>
       <div class="main">
-        <div class="row"><strong>${escHtml(names[id])}${name}</strong>
+        <div class="row"><strong>${escHtml(p.name)}</strong>
           <span class="board-badge">${icon(BADGE_ICON[task.state])}${escHtml(t(`board.st.${task.state}`))}</span></div>
-        <p class="desc">${escHtml(t(`board.task.${id}`))}</p>
+        <p class="desc">${escHtml(p.role === "director" && part === "teacher"
+          ? `${taskText(board.kind, "teacher", "teacher")} ${taskText(board.kind, "director")}`
+          : taskText(board.kind, p.role, part))}</p>
         <div class="meta">${meta}</div>
         ${when ? `<div class="meta" style="margin-top:4px"><span>${icon("clock")}${escHtml(when)}</span></div>` : ""}
         ${task.error ? `<p class="note err">${escHtml(task.error)}</p>` : task.note ? `<p class="note">“${escHtml(task.note)}”</p>` : ""}
@@ -1183,7 +1484,7 @@ function clearBoard() {
   try { localStorage.removeItem(BOARD_KEY); } catch { /* bỏ qua */ }
   closeBoard();
   toast(t("board.cleared"), 2500, "check");
-  log(t("log.boardCleared"), "job");
+  log(t("log.boardCleared", { name: choreName() }), "job");
   if (managerFree()) eraseBoardScene(); else runtime.boardInk = 0;
 }
 $("boardClear").addEventListener("click", clearBoard);
@@ -1194,26 +1495,26 @@ const escHtml = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<
 const PRINT_CSS = `
   @page { size: A4; margin: 16mm 15mm 18mm; }
   * { box-sizing: border-box; }
-  body { margin: 0; color: #1d2a22; font: 10.5pt/1.55 "Be Vietnam Pro", "Segoe UI", "Yu Gothic UI", "Meiryo", Arial, sans-serif; }
+  body { margin: 0; color: #181f2f; font: 10.5pt/1.55 "Be Vietnam Pro", "Segoe UI", "Yu Gothic UI", "Meiryo", Arial, sans-serif; }
   .doc { break-after: page; }
   .doc:last-child { break-after: auto; }
-  header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2.5px solid #2f7d4f; padding-bottom: 6px; }
-  .brand { font-weight: 800; letter-spacing: .14em; color: #2f7d4f; font-size: 13pt; }
-  .brand small { display: block; letter-spacing: .02em; font-weight: 500; color: #5b6b61; font-size: 8.5pt; }
-  .kind { font-size: 9pt; color: #5b6b61; text-transform: uppercase; letter-spacing: .08em; }
+  header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2.5px solid #123d9a; padding-bottom: 6px; }
+  .brand { font-weight: 800; letter-spacing: .14em; color: #123d9a; font-size: 13pt; }
+  .brand small { display: block; letter-spacing: .02em; font-weight: 500; color: #555e71; font-size: 8.5pt; }
+  .kind { font-size: 9pt; color: #555e71; text-transform: uppercase; letter-spacing: .08em; }
   h1.title { font-size: 17pt; margin: 14px 0 8px; line-height: 1.3; }
-  table.info { border-collapse: collapse; margin: 0 0 14px; font-size: 9pt; color: #3c4a41; }
+  table.info { border-collapse: collapse; margin: 0 0 14px; font-size: 9pt; color: #373e4f; }
   table.info td { padding: 2px 14px 2px 0; border: 0; }
-  table.info td:first-child { color: #6b7a70; }
+  table.info td:first-child { color: #656e80; }
   .body h1 { font-size: 14pt; } .body h2 { font-size: 12.5pt; } .body h3 { font-size: 11pt; }
-  .body h1, .body h2, .body h3 { color: #24603d; margin: 14px 0 6px; break-after: avoid; }
+  .body h1, .body h2, .body h3 { color: #0d2f77; margin: 14px 0 6px; break-after: avoid; }
   .body p, .body li { orphans: 3; widows: 3; }
   .body table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 9pt; break-inside: avoid; }
-  .body th, .body td { border: 1px solid #b9c7bd; padding: 4px 6px; text-align: left; vertical-align: top; }
-  .body th { background: #e8f1ea; }
+  .body th, .body td { border: 1px solid #b4bbcc; padding: 4px 6px; text-align: left; vertical-align: top; }
+  .body th { background: #e4e9f5; }
   .body code { font-family: Consolas, monospace; font-size: 9pt; background: #f0f3f1; padding: 0 3px; }
-  .body blockquote { margin: 8px 0; padding: 4px 12px; border-left: 3px solid #9cc4a9; color: #3c4a41; }
-  footer { margin-top: 18px; padding-top: 6px; border-top: 1px solid #c9d4cc; font-size: 8pt; color: #6b7a70; }
+  .body blockquote { margin: 8px 0; padding: 4px 12px; border-left: 3px solid #8ea3d2; color: #373e4f; }
+  footer { margin-top: 18px; padding-top: 6px; border-top: 1px solid #c4cbd9; font-size: 8pt; color: #656e80; }
 `;
 
 function printDocument(entries) {
@@ -1227,14 +1528,14 @@ function printDocument(entries) {
       e.meta && [t("print.info"), e.meta],
     ].filter(Boolean).map(([k, v]) => `<tr><td>${escHtml(k)}</td><td>${escHtml(v)}</td></tr>`).join("");
     return `<article class="doc">
-      <header><div class="brand">MINI CAPITAL<small>${escHtml(t("brand.tagline"))}</small></div><div class="kind">${escHtml(t("print.kind"))}</div></header>
+      <header><div class="brand">GKI<small>${escHtml(t("brand.tagline"))}</small></div><div class="kind">${escHtml(t("print.kind"))}</div></header>
       <h1 class="title">${escHtml(e.title)}</h1>
       <table class="info">${rows}</table>
       <div class="body">${renderMarkdown(e.text)}</div>
       <footer>${escHtml(t("print.footer"))}</footer>
     </article>`;
   }).join("");
-  const title = entries.length === 1 ? `Mini Capital - ${entries[0].title}` : `Mini Capital - ${t("print.kind")} (${entries.length})`;
+  const title = entries.length === 1 ? `GKI - ${entries[0].title}` : `GKI - ${t("print.kind")} (${entries.length})`;
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
   frame.style.cssText = "position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0;pointer-events:none";
@@ -1294,13 +1595,15 @@ function setStatus(text, tone = "") {
 
 function refreshControls() {
   const btn = $("missionButton");
-  const busy = net.busy || isDemoRunning();
-  btn.disabled = !client || busy || net.submitting || (!OFFLINE && (!net.connected || !net.modelsLoaded));
-  setLabel(btn, busy || net.submitting ? "spinner" : "send", busy ? t("task.busy") : net.submitting ? t("task.sending") : OFFLINE ? t("task.sendDemo") : t("task.send"));
+  const busy = net.busy || isDemoRunning() || lessonState().active;
+  const live = !OFFLINE && net.connected && net.modelsLoaded;
+  btn.disabled = !client || busy || net.submitting;
+  setLabel(btn, busy || net.submitting ? "spinner" : "send", busy ? t("task.busy") : net.submitting ? t("task.sending") : live ? t("task.send") : t("task.sendDemo"));
   btn.title = !client ? t("task.needPledge") : "";
   $("connDot").dataset.on = String(net.connected);
   $("connText").textContent = OFFLINE ? t("conn.preview") : net.connected ? t("conn.on") : t("conn.off");
   $("runDemo").disabled = busy;
+  renderTaskTab();
 }
 
 function setBusy(busy) {
@@ -1331,19 +1634,15 @@ function handleMessage(msg) {
       applyStatus(msg.agent, msg.status, msg.message);
       boardStatus(msg.agent, msg.status, msg.message);
       renderTeam();
-      if (msg.status !== "idle") log(`${titles()[msg.agent] || msg.agent}: ${msg.message}`, msg.status === "error" ? "error" : "");
+      if (msg.status !== "idle") log(`${nameOf(msg.agent)}: ${msg.message}`, msg.status === "error" ? "error" : "");
       break;
     case "activity":
       applyActivity(msg.agent, msg.kind, msg.message);
-      if (msg.kind === "tool" && board?.tasks[msg.agent]) { board.tasks[msg.agent].tools++; boardChanged(); }
-      if (msg.kind === "tool" || msg.kind === "tool_error") {
-        log(`${titles()[msg.agent] || msg.agent}: ${msg.kind === "tool" ? "🔎" : "⚠️"} ${msg.message}`, msg.kind === "tool" ? "tool" : "error");
-      }
       break;
     case "handoff":
       applyHandoff(msg.from, msg.to);
       if (board?.tasks[msg.from] && msg.message) { board.tasks[msg.from].note = msg.message; boardChanged(); }
-      log(t("log.handoff", { from: titles()[msg.from], to: titles()[msg.to], msg: msg.message ? ` “${msg.message}”` : "" }), "handoff");
+      log(t("log.handoff", { from: nameOf(msg.from), to: nameOf(msg.to), msg: msg.message ? ` “${msg.message}”` : "" }), "handoff");
       break;
     case "job":
       if (msg.state === "started") {
@@ -1352,25 +1651,28 @@ function handleMessage(msg) {
         setStatus(t("status.accepted", { prompt: msg.prompt }), "busy");
         boardStart(msg);
         log(t("log.newJob", { prompt: msg.prompt }), "job");
+        beginJobScene();
       } else if (msg.state === "finished") {
         setBusy(false);
+        finishJobScene();
         const secs = Math.round((Date.now() - net.jobStartedAt) / 1000);
         const meta = t("report.meta", {
           client: client ? clientName(client.name) : "—",
           time: fmtDateTime(),
-          models: msg.demo ? t("report.demoTag") : `${modelLabel("leaderSelect")} + ${modelLabel("workerSelect")}`,
+          models: `${kindDoc(board?.kind || net.pendingJob?.kind || "course")} · ${msg.demo ? t("report.demoTag") : `${modelLabel("leaderSelect")} + ${modelLabel("workerSelect")}`}`,
           secs,
         });
         showReport(msg.result || "", meta, { persist: true });
         boardEnd("finished");
         setStatus(t("status.done"), "ok");
         log(t("log.approved"), "job");
-        runScript("manager", [
+        if (!staff.manager?.lesson) runScript("manager", [
           { say: client ? t("greet.reportReady", { client: clientName(client.name) }) : t("greet.reportReadyAnon"), face: "S", gesture: "wave", seconds: 3.5 },
           { home: true },
         ]);
       } else if (msg.state === "failed") {
         setBusy(false);
+        finishJobScene();
         showReport(t("report.failed", { error: msg.error }), null, { error: true });
         boardEnd("failed", msg.error);
         setStatus(t("status.error", { error: msg.error }), "error");
@@ -1444,15 +1746,178 @@ for (const [selectId, role] of [["leaderSelect", "leader"], ["workerSelect", "te
   $(selectId).addEventListener("change", () => store.set(MODEL_KEY, { ...store.get(MODEL_KEY, {}), [role]: $(selectId).value }));
 }
 
+// ---------------------------------------------------------------------------
+// Form giao việc: loại nhiệm vụ + thành viên (thiết kế khoá học / lộ trình) hoặc giảng viên, phòng, trợ lý, sĩ số (buổi dạy).
+// ---------------------------------------------------------------------------
+const TASK_KEY = "ai-office-task-form";
+const taskForm = Object.assign({ kind: "course", members: null, teacher: "", assistants: ["", ""], room: "classBig", students: 12 }, store.get(TASK_KEY, {}));
+// Bản cũ chỉ có một trợ lý (taskForm.assistant) -> chuyển sang danh sách tối đa 2 trợ giảng.
+if (!Array.isArray(taskForm.assistants)) taskForm.assistants = [taskForm.assistant || "", ""];
+taskForm.assistants = [0, 1].map(i => taskForm.assistants[i] || "");
+delete taskForm.assistant;
+const chosenAssistants = () => taskForm.assistants.filter(Boolean);
+if (!KIND_KEYS.includes(taskForm.kind)) taskForm.kind = "course";
+const saveTaskForm = () => store.set(TASK_KEY, taskForm);
+const staffOnly = () => team.filter(r => r.id !== DIRECTOR_ID);
+// Mặc định: mỗi vai trò một người (đỡ tốn lượt gọi AI).
+function defaultMembers() {
+  const seen = new Set();
+  return staffOnly().filter(r => !seen.has(r.role) && seen.add(r.role)).map(r => r.id);
+}
+const chosenMembers = () => {
+  const ids = (taskForm.members || defaultMembers()).filter(id => recOf(id) && id !== DIRECTOR_ID);
+  return staffOnly().map(r => r.id).filter(id => ids.includes(id));
+};
+
+// Các phòng có bàn học (mọi tầng): { id, floor, seats (bàn học), work (bàn laptop / bàn làm việc cho trợ giảng) }.
+function classroomList() {
+  const out = [];
+  for (const f of FLOOR_IDS) {
+    const items = f === FLOOR ? layout : layouts[f];
+    for (const room of floorRooms(f)) {
+      const inRoom = items.filter(it => roomAtOn(f, it.x, it.y) === room.id);
+      const seats = inRoom.filter(it => CATALOG[it.type]?.student).length;
+      if (seats) out.push({ id: room.id, floor: f, seats, work: inRoom.filter(isWorkDesk).length });
+    }
+  }
+  return out;
+}
+
+function renderTaskForm() {
+  const kinds = $("taskKinds");
+  kinds.replaceChildren(...KIND_KEYS.map(k => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `kind-btn${taskForm.kind === k ? " on" : ""}`;
+    b.setAttribute("role", "radio");
+    b.setAttribute("aria-checked", String(taskForm.kind === k));
+    b.textContent = kindName(k);
+    b.addEventListener("click", () => { taskForm.kind = k; saveTaskForm(); renderTaskForm(); });
+    return b;
+  }));
+  $("taskInput").placeholder = kindPlaceholder(taskForm.kind);
+  const lessonMode = taskForm.kind === "lesson";
+  $("taskMembers").hidden = lessonMode;
+  $("taskLesson").hidden = !lessonMode;
+
+  const chosen = new Set(chosenMembers());
+  $("taskMemberList").replaceChildren(...staffOnly().map(r => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = `member-chip${chosen.has(r.id) ? " on" : ""}`;
+    b.setAttribute("aria-pressed", String(chosen.has(r.id)));
+    b.innerHTML = `<span class="team-dot"></span><span></span>`;
+    b.querySelector(".team-dot").style.background = roleColor(r.id);
+    b.querySelector("span:last-child").textContent = nameOf(r.id);
+    b.title = roleTitle(r.role);
+    b.addEventListener("click", () => {
+      const set = new Set(chosenMembers());
+      if (set.has(r.id)) set.delete(r.id); else set.add(r.id);
+      taskForm.members = [...set];
+      saveTaskForm();
+      renderTaskForm();
+    });
+    return b;
+  }));
+
+  // Buổi dạy
+  // Giám đốc kiêm giảng viên: luôn có thể đứng lớp.
+  const teacherPool = [...team.filter(r => r.id === DIRECTOR_ID), ...staffOnly().filter(r => r.role === "teacher" || r.role === "sensei")];
+  if (!teacherPool.some(r => r.id === taskForm.teacher)) taskForm.teacher = (teacherPool.find(r => r.role === "teacher" || r.role === "sensei") || teacherPool[0])?.id || "";
+  const tSel = $("lessonTeacher");
+  tSel.replaceChildren(...teacherPool.map(r => new Option(`${nameOf(r.id)} · ${roleTitle(r.role)}`, r.id)));
+  tSel.value = taskForm.teacher;
+  // Tối đa 2 trợ giảng ngồi cuối lớp (không trùng nhau, không trùng giảng viên).
+  const others = team.filter(r => r.id !== taskForm.teacher && r.id !== DIRECTOR_ID);
+  taskForm.assistants = taskForm.assistants.map(id => (others.some(r => r.id === id) ? id : ""));
+  if (taskForm.assistants[1] && taskForm.assistants[1] === taskForm.assistants[0]) taskForm.assistants[1] = "";
+  ["lessonAssistant", "lessonAssistant2"].forEach((elId, i) => {
+    const sel = $(elId);
+    const other = taskForm.assistants[1 - i];
+    sel.replaceChildren(new Option(t("task.noAssistant"), ""),
+      ...others.filter(r => r.id !== other).map(r => new Option(`${nameOf(r.id)} · ${roleTitle(r.role)}`, r.id)));
+    sel.value = taskForm.assistants[i];
+  });
+  // Phòng học = mọi phòng (ở bất kỳ tầng nào) có kê bàn học.
+  const rooms = classroomList();
+  if (!rooms.some(r => r.id === taskForm.room)) taskForm.room = rooms[0]?.id || "classBig";
+  const rSel = $("lessonRoom");
+  rSel.replaceChildren(...(rooms.length ? rooms : [{ id: "classBig", floor: 9, seats: 0, work: 0 }])
+    .map(r => new Option(`${t("floor.name", { n: r.floor })} · ${t(`room.${r.id}`)} (${t("task.seats", { n: r.seats })})`, r.id)));
+  rSel.value = taskForm.room;
+  // Trợ giảng ưu tiên ngồi bàn laptop / bàn làm việc trong phòng học; chỉ khi thiếu mới chiếm bàn học viên.
+  const cur = rooms.find(r => r.id === taskForm.room) || { seats: 0, work: 0 };
+  const maxSeats = Math.max(0, cur.seats - Math.max(0, chosenAssistants().length - cur.work));
+  const n = $("lessonStudents");
+  n.max = String(maxSeats);
+  taskForm.students = Math.max(0, Math.min(maxSeats, Number(taskForm.students) || 0));
+  n.value = String(taskForm.students);
+  $("lessonMax").textContent = `/ ${maxSeats}`;
+}
+$("lessonTeacher").addEventListener("change", e => { taskForm.teacher = e.target.value; saveTaskForm(); renderTaskForm(); });
+$("lessonAssistant").addEventListener("change", e => { taskForm.assistants[0] = e.target.value; saveTaskForm(); renderTaskForm(); });
+$("lessonAssistant2").addEventListener("change", e => { taskForm.assistants[1] = e.target.value; saveTaskForm(); renderTaskForm(); });
+$("lessonRoom").addEventListener("change", e => { taskForm.room = e.target.value; taskForm.students = 99; saveTaskForm(); renderTaskForm(); });
+$("lessonStudents").addEventListener("change", e => { taskForm.students = Number(e.target.value) || 0; saveTaskForm(); renderTaskForm(); });
+
+// Mô tả nhiệm vụ gửi backend / mô phỏng.
+function buildJob() {
+  const kind = taskForm.kind;
+  if (kind === "lesson") {
+    if (!recOf(taskForm.teacher)) return { error: t("task.needTeacher") };
+    const ids = [...(taskForm.teacher !== DIRECTOR_ID ? [taskForm.teacher] : []), ...chosenAssistants()];
+    return {
+      kind, directorId: DIRECTOR_ID,
+      members: ids.map(id => ({ id, role: recOf(id).role })),
+      lesson: { teacher: taskForm.teacher, assistants: chosenAssistants(), room: taskForm.room, students: taskForm.students },
+    };
+  }
+  const ids = chosenMembers();
+  if (!ids.length) return { error: t("task.needMember") };
+  return { kind, directorId: DIRECTOR_ID, members: ids.map(id => ({ id, role: recOf(id).role })), lesson: null };
+}
+
+// Khi nhiệm vụ bắt đầu: người tham gia sang bàn làm việc; buổi dạy thì mở lớp.
+let lessonEndTimer = 0;
+function beginJobScene() {
+  const job = net.pendingJob;
+  if (!job) return;
+  setInJob([job.directorId, ...job.members.map(m => m.id)], true);
+  if (job.kind === "lesson" && job.lesson) {
+    switchFloor(roomFloorOf(job.lesson.room)); // tới tầng có phòng học đó
+    clearTimeout(lessonEndTimer);
+    const r = startLesson({ teacher: job.lesson.teacher, assistants: job.lesson.assistants || [], room: job.lesson.room, count: job.lesson.students });
+    if (r.ok) {
+      net.lessonStartedAt = Date.now();
+      log(t("log.lessonStart", { teacher: nameOf(job.lesson.teacher), room: t(`room.${job.lesson.room}`), n: r.seats }), "job");
+    } else toast(t("task.lessonFail"), 4500, "alert");
+  }
+}
+// Kết thúc: về bàn mặc định; lớp học kéo dài tối thiểu 40 giây cho trọn cảnh.
+function finishJobScene() {
+  setInJob([], false);
+  if (!lessonState().active) return;
+  const wait = Math.max(0, 40000 - (Date.now() - (net.lessonStartedAt || 0)));
+  clearTimeout(lessonEndTimer);
+  lessonEndTimer = setTimeout(() => { endLesson(); log(t("log.lessonEnd"), "job"); refreshControls(); }, wait);
+}
+
 async function startMission() {
-  const prompt = $("taskInput").value.trim();
-  if (!client) { setStatus(t("status.needPledge"), "error"); return; }
-  if (!prompt) { setStatus(t("status.emptyPrompt"), "error"); $("taskInput").focus(); return; }
-  if (net.busy || net.submitting || isDemoRunning()) return;
-  if (OFFLINE) {
-    toast(t("toast.demoOffline"), 3500, "play");
+  let prompt = $("taskInput").value.trim();
+  if (!client) { setStatus(t("status.needPledge"), "error"); toast(t("status.needPledge"), 3500, "alert"); return; }
+  // Buổi dạy: không nhập chủ đề thì giảng viên tự chọn chủ đề phù hợp.
+  if (!prompt && taskForm.kind === "lesson") prompt = t("task.defaultLesson");
+  if (!prompt) { setStatus(t("status.emptyPrompt"), "error"); toast(t("status.emptyPrompt"), 3500, "alert"); $("taskInput").focus(); return; }
+  if (net.busy || net.submitting || isDemoRunning() || lessonState().active) return;
+  const job = buildJob();
+  if (job.error) { setStatus(job.error, "error"); toast(job.error, 3500, "alert"); return; }
+  net.pendingJob = job;
+  // Không có máy chủ AI (bản xem thử, hoặc backend chưa chạy / chưa có API key): vẫn cho chạy bằng mô phỏng.
+  const simulate = OFFLINE || !net.connected || !net.modelsLoaded;
+  if (simulate) {
+    toast(t(OFFLINE ? "toast.demoOffline" : "toast.demoNoServer"), 4500, "play");
     net.lastPrompt = prompt;
-    runDemo(handleMessage, client.name, prompt).finally(refreshControls);
+    runDemo(handleMessage, client.name, prompt, job).finally(refreshControls);
     refreshControls();
     return;
   }
@@ -1461,15 +1926,24 @@ async function startMission() {
   // Ghi nhớ trước khi gửi: sự kiện "job started" có thể tới qua WebSocket trước cả khi fetch trả về.
   net.lastPrompt = prompt;
   net.pendingModels = [modelLabel("leaderSelect"), modelLabel("workerSelect")];
+  const member = id => ({ id, name: nameOf(id).slice(0, 40), role: recOf(id).role, gender: recOf(id).look.gender === "female" ? "female" : "male" });
   try {
     const res = await fetch(`${API_BASE}/api/tasks`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, language: getLang(), client_name: client.name, manager_choice: $("leaderSelect").value, worker_choice: $("workerSelect").value }),
+      body: JSON.stringify({
+        prompt, language: getLang(), client_name: client.name,
+        manager_choice: $("leaderSelect").value, worker_choice: $("workerSelect").value,
+        kind: job.kind, director: member(job.directorId), team: job.members.map(m => member(m.id)),
+        lesson: job.lesson ? { ...job.lesson, room: t(`room.${job.lesson.room}`) } : null,
+      }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      const detail = typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`;
+      const detail = typeof body.detail === "string" ? body.detail
+        : Array.isArray(body.detail) ? body.detail.map(d => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join("; ").slice(0, 300) || `HTTP ${res.status}`
+          : `HTTP ${res.status}`;
+      toast(t("status.rejected", { detail }), 6000, "alert");
       setStatus(t("status.rejected", { detail }), "error");
       log(t("status.rejected", { detail }), "error");
     }
@@ -1487,19 +1961,24 @@ $("taskInput").addEventListener("keydown", event => {
 });
 
 $("runDemo").addEventListener("click", () => {
-  if (net.busy) return;
+  if (net.busy || isDemoRunning() || lessonState().active) return;
+  const job = buildJob();
+  if (job.error) { toast(job.error, 3500, "alert"); return; }
   setDrawer(false);
   toast(t("toast.demo"), 3500, "play");
-  runDemo(handleMessage, client?.name || t("client.guest")).finally(refreshControls);
+  net.pendingJob = job;
+  net.lastPrompt = "";
+  runDemo(handleMessage, client?.name || t("client.guest"), null, job).finally(refreshControls);
   refreshControls();
 });
 
 // ===========================================================================
 // Màn chào + Đơn cam kết
 // ===========================================================================
-const GREET_SPOT = { x: 330, y: 495 };
+const GREET_SPOT = { x: 340, y: 705 }; // sảnh, ngay lối vào
 
 async function firstVisit({ withIntro = true } = {}) {
+  switchFloor(9);
   flags.breaksPaused = true;
   if (withIntro) {
     document.body.classList.add("booting");
@@ -1586,8 +2065,9 @@ langSelect.addEventListener("change", () => setLang(langSelect.value));
 
 window.addEventListener("langchange", () => {
   langSelect.value = getLang();
-  renameStaff();
-  renderAssignmentOptions();
+  applyTeam({ persist: false });
+  if (!$("staffModal").hidden) renderStaffEditor();
+  renderFloorSwitch();
   renderModels();
   if (OFFLINE) for (const id of ["leaderSelect", "workerSelect"]) $(id).options[0].text = t("models.offline");
   furnToggleLabel();
@@ -1609,7 +2089,50 @@ furnToggleLabel();
 setStatus(t("status.connecting"));
 $("connText").textContent = t("conn.connecting");
 commitLayout({ persist: false });
+// Cửa tự động: mở khi có nhân viên / học viên tới gần.
+setDoorSensor(() => visibleAgents().filter(a => !a.hidden));
+flags.workMode = !!store.get("ai-office-workmode", false);
+applyTeam({ persist: false });
 seatEveryone();
+// Bàn có ghế lọt qua / chạm vách (bố cục cũ, trước khi có kiểm tra ghế): kéo lùi bàn ra xa vách,
+// không được thì xoay ngược lại – người ngồi không còn bị "dính tường". Làm cho từng tầng.
+function fixBlockedChairs() {
+  let fixed = 0;
+  const start = FLOOR;
+  for (const f of FLOOR_IDS) {
+    if (f !== FLOOR) { layouts[FLOOR] = layout; setFloor(f); layout = layouts[f]; }
+    let changed = false;
+    for (const d of layout.filter(isWorkDesk)) {
+      if (!chairBlocked(d)) continue;
+      const tryAt = (cand) => fitsInRoom(cand, cand) && !overlapsAny(cand, layout, cand);
+      let done = false;
+      // 1) Lùi theo hướng ngược phía ghế (5..40 đơn vị), rồi xê dịch ngang một chút.
+      const [bx, by] = toWorld(rot(d), 0, -1);
+      for (let k = 5; k <= 40 && !done; k += 5) {
+        for (const side of [0, 5, -5, 10, -10]) {
+          const [sx, sy] = toWorld(rot(d), 1, 0);
+          const cand = { ...d, x: d.x + bx * k + sx * side, y: d.y + by * k + sy * side };
+          if (tryAt(cand)) { Object.assign(d, { x: cand.x, y: cand.y }); done = true; break; }
+        }
+      }
+      // 2) Xoay ngược 180° (ghế sang phía bên này).
+      if (!done) {
+        const cand = { ...d, rotation: (rot(d) + 2) % 4 };
+        if (tryAt(cand)) { d.rotation = cand.rotation; done = true; }
+      }
+      if (done) { d._cache = null; fixed++; changed = true; }
+    }
+    if (changed) store.set(FLOOR_LAYOUT_KEYS[f], layout.map(({ _cache, ...rest }) => rest));
+  }
+  if (FLOOR !== start) { layouts[FLOOR] = layout; setFloor(start); layout = layouts[start]; }
+  return fixed;
+}
+const chairsFixed = fixBlockedChairs();
+if (chairsFixed) { commitLayout({ persist: false }); seatEveryone(); setTimeout(() => toast(t("furn.chairsFixed", { n: chairsFixed }), 5000, "check"), 1500); }
+
+// Mở lại tầng đang xem lần trước (khách mới thì ở tầng 9 để Giám đốc ra chào).
+if (client) switchFloor(Number(store.get(FLOOR_KEY, 9)) || 9, { remember: false });
+renderFloorSwitch();
 applyPanels();
 renderTeam();
 renderClient();
@@ -1633,7 +2156,8 @@ if (client) returningVisit(); else firstVisit();
 // office.simulate({...}) cho phép thử luồng sự kiện mà không cần gọi LLM thật.
 // screenOf(x, y, z): toạ độ màn hình của một điểm trong phòng (cho kiểm thử tự động).
 window.office = {
-  staff, get layout() { return layout; }, ISO, simulate: handleMessage, cancelDemo,
+  staff, get layout() { return layout; }, get team() { return team; }, ISO, simulate: handleMessage, cancelDemo,
+  startLesson, endLesson, lessonState, allAgents, switchFloor, get floor() { return FLOOR; }, setWorkMode, openStaff, buildJob, taskForm, renderTaskForm,
   screenOf(x, y, z = 0) {
     const p = project(x, y, z), s = view.scale * camera.zoom;
     return { x: view.cx + (p.x - camera.focus.x) * s, y: view.cy + (p.y - camera.focus.y) * s };

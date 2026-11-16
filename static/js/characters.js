@@ -10,24 +10,67 @@ import { drawPaperBall } from "./furniture.js";
 export const SCALE = 1.25;
 const BODY_Y = -27; // khoảng cách từ chân tới "thắt lưng" của sprite gốc
 
-export const LOOKS = {
-  manager: {
-    skin: "#e8b98f", hair: "#3b3836", style: "swept", glasses: false, tie: true,
-    outfit: { jacket: "#2d3a4f", shirt: "#e9edf2", trim: "#b8433a", pants: "#232c3b" },
-  },
-  analyst: {
-    skin: "#f2cfae", hair: "#6b3e22", style: "bun", glasses: true,
-    outfit: { jacket: "#7a5c8e", shirt: "#efe6d8", trim: "#d9b44a", pants: "#3a3f4a" },
-  },
-  quant: {
-    skin: "#c68b5e", hair: "#1a1a1a", style: "hood", glasses: false,
-    outfit: { jacket: "#2f6f5a", shirt: "#244f42", trim: "#9bd78c", pants: "#2b2f36" },
-  },
-  risk: {
-    skin: "#8d5a3b", hair: "#1b1410", style: "beard", glasses: true,
-    outfit: { jacket: "#b5623b", shirt: "#f0e3cf", trim: "#3a6fb0", pants: "#34404d" },
-  },
-};
+// ---------------------------------------------------------------------------
+// Ngoại hình tuỳ chỉnh được. Bản lưu (look) gọn, dễ sửa trong giao diện; buildLook() đổi sang tham số vẽ.
+//   { skin, hair, hairStyle, outfit, jacket, shirt, accent, pants, glasses, beard, headphones, lanyard, earrings }
+// ---------------------------------------------------------------------------
+export const SKINS = ["#f6d7bd", "#f2cfae", "#e8b98f", "#d7a074", "#c68b5e", "#a86f48", "#8d5a3b", "#6b4228"];
+export const HAIRS = ["#1a1a1a", "#3b3836", "#5a3825", "#6b3e22", "#8a5a2b", "#c79a52", "#d8c08a", "#a8a8a8", "#b8433a", "#3a5fb0"];
+export const HAIR_STYLES = ["short", "swept", "fade", "bun", "long", "bald"];
+export const OUTFITS = ["suit", "blazer", "shirt", "hoodie"];
+export const ACCESSORIES = ["glasses", "beard", "headphones", "lanyard", "earrings"];
+export const GENDERS = ["male", "female"];
+export const BOTTOMS = ["pants", "skirt"];
+
+const pick = list => list[Math.floor(Math.random() * list.length)];
+
+export function randomLook(gender = pick(GENDERS)) {
+  const outfit = pick(OUTFITS);
+  const female = gender === "female";
+  return {
+    gender, bottom: female && Math.random() < 0.75 ? "skirt" : "pants", skin: pick(SKINS), hair: pick(HAIRS.slice(0, 8)),
+    hairStyle: pick(female ? ["long", "bun", "long", "short"] : ["short", "swept", "fade", "short", "bald"]), outfit,
+    jacket: pick(["#2d3a4f", "#7a5c8e", "#2f6f5a", "#b5623b", "#3a5f8f", "#5b6470", "#8a3f4a", "#2f5cbd"]),
+    shirt: pick(["#e9edf2", "#efe6d8", "#ffffff", "#dfe9f7", "#f3e1e6"]),
+    accent: pick(["#b8433a", "#d9b44a", "#3a6fb0", "#9bd78c", "#c99a1c"]),
+    pants: pick(["#232c3b", "#3a3f4a", "#2b2f36", "#4a5160", "#5a4632"]),
+    glasses: Math.random() < 0.3, beard: !female && Math.random() < 0.15, headphones: Math.random() < 0.15, lanyard: Math.random() < 0.4,
+    earrings: female && Math.random() < 0.5,
+  };
+}
+
+// Học viên: suit công sở (vest tối màu, sơ mi sáng, cà vạt).
+export function studentLook() {
+  const jacket = pick(["#1f2a3d", "#2b2f36", "#3a3f4a", "#22324f", "#474c55", "#2a2a30"]);
+  const gender = pick(GENDERS), female = gender === "female";
+  return {
+    gender, bottom: female ? "skirt" : "pants", skin: pick(SKINS), hair: pick(HAIRS.slice(0, 7)), hairStyle: pick(female ? ["long", "bun", "long"] : ["short", "swept", "fade", "short"]), outfit: "suit",
+    jacket, shirt: pick(["#ffffff", "#e9f0fa", "#f4f4f0"]), accent: pick(["#b8433a", "#2f5cbd", "#7a5c8e", "#2f6f5a", "#c99a1c", "#5b6470"]),
+    pants: shade(jacket, -0.1), glasses: Math.random() < 0.25, beard: false, headphones: false, lanyard: false, earrings: female && Math.random() < 0.4,
+  };
+}
+
+export function buildLook(look) {
+  const k = look || {};
+  const outfit = OUTFITS.includes(k.outfit) ? k.outfit : "suit";
+  const jacket = k.jacket || "#2d3a4f", shirt = k.shirt || "#e9edf2", accent = k.accent || "#b8433a";
+  const O = outfit === "shirt" ? { jacket: shirt, shirt: shade(shirt, 0.1), trim: accent }
+    : outfit === "hoodie" ? { jacket, shirt: shade(jacket, -0.22), trim: accent }
+      : { jacket, shirt, trim: accent };
+  return {
+    skin: k.skin || SKINS[2], hair: k.hair || HAIRS[1],
+    style: HAIR_STYLES.includes(k.hairStyle) ? k.hairStyle : "short",
+    hood: outfit === "hoodie", tie: outfit === "suit", shirtOnly: outfit === "shirt", female: k.gender === "female", skirt: k.bottom === "skirt",
+    glasses: !!k.glasses, beard: !!k.beard, headphones: !!k.headphones, lanyard: !!k.lanyard, earrings: !!k.earrings,
+    outfit: { ...O, pants: k.pants || "#232c3b" },
+  };
+}
+
+function lookOf(agent) {
+  const key = JSON.stringify(agent.look || null);
+  if (agent._lookKey !== key) { agent._lookKey = key; agent._L = buildLook(agent.look); }
+  return agent._L;
+}
 
 const VIEWS = {
   S: ["front", false], SE: ["front34", false], SW: ["front34", true],
@@ -51,11 +94,23 @@ function swingArm(ctx, sx, sy, angle, sleeve, skin, length = 12) {
 // ---------------------------------------------------------------------------
 // Đầu
 // ---------------------------------------------------------------------------
+const hasHair = L => !L.hood && L.style !== "bald";
+// Tóc cạo cao hai bên (fade): hai bên + gáy chỉ còn lớp chân tóc mờ, đỉnh đầu giữ một mảng tóc ngắn.
+const isFade = L => !L.hood && L.style === "fade";
+function mixHex(a, b, t) {
+  const p = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const A = p(a), B = p(b);
+  return `#${A.map((v, i) => Math.round(v + (B[i] - v) * t).toString(16).padStart(2, "0")).join("")}`;
+}
+const buzz = L => mixHex(L.skin, L.hair, 0.42);
+const HP = "#2a2f3a"; // tai nghe
+
 function headFront(ctx, L, s) {
   const { x, y } = s;
-  if (L.style === "hood") { R(ctx, shade(L.outfit.jacket, -0.25), x - 13, y - 33, 26, 25); R(ctx, L.outfit.jacket, x - 11, y - 31, 22, 21); }
-  if (L.style === "bun") R(ctx, L.hair, x - 4, y - 42, 8, 7);
-  R(ctx, s.faceShadow, x - 9, y - 31, 18, 20);
+  if (L.hood) { R(ctx, shade(L.outfit.jacket, -0.25), x - 13, y - 33, 26, 25); R(ctx, L.outfit.jacket, x - 11, y - 31, 22, 21); }
+  if (L.style === "bun" && !L.hood) R(ctx, L.hair, x - 4, y - 42, 8, 7);
+  if (L.style === "long" && !L.hood) { R(ctx, L.hair, x - 12, y - 31, 4, 18); R(ctx, L.hair, x + 8, y - 31, 4, 18); }
+  R(ctx, s.faceShadow, x - 9, y - 31, 18, L.female ? 17 : 20); // nữ: không có bóng hàm dưới cằm (trông như râu)
   R(ctx, L.skin, x - 8, y - 32, 16, 18);
   R(ctx, s.faceLight, x - 6, y - 30, 10, 12);
   R(ctx, L.skin, x - 12, y - 26, 4, 7); R(ctx, L.skin, x + 8, y - 26, 4, 7);
@@ -67,98 +122,150 @@ function headFront(ctx, L, s) {
   R(ctx, "#2a1d16", x - 5, y - 27, 4, 1); R(ctx, "#2a1d16", x + 1, y - 27, 4, 1);
   R(ctx, s.faceShadow, x, y - 23, 2, 4);
   mouth(ctx, L, s, x - 3, 6);
-  if (L.style === "beard") { R(ctx, L.hair, x - 7, y - 19, 14, 5); R(ctx, L.hair, x - 5, y - 14, 10, 3); mouth(ctx, L, s, x - 2, 5); }
+  if (L.female && !s.blink) { R(ctx, "#2a1d16", x - 6, y - 26, 1, 1); R(ctx, "#2a1d16", x + 5, y - 26, 1, 1); }
+  if (L.female) { R(ctx, "rgba(232, 118, 128, .45)", x - 7, y - 22, 3, 2); R(ctx, "rgba(232, 118, 128, .45)", x + 4, y - 22, 3, 2); }
+  if (L.beard) { R(ctx, L.hair, x - 7, y - 19, 14, 5); R(ctx, L.hair, x - 5, y - 14, 10, 3); mouth(ctx, L, s, x - 2, 5); }
   if (L.glasses && !s.blink) {
     ctx.strokeStyle = "#1b1f1d"; ctx.lineWidth = 1.5;
     ctx.strokeRect(x - 7, y - 27, 6, 5); ctx.strokeRect(x + 1, y - 27, 6, 5);
     R(ctx, "#1b1f1d", x - 1, y - 25, 2, 1);
   }
+  if (L.earrings && !L.hood) { R(ctx, "#e8c25a", x - 11, y - 19, 2, 2); R(ctx, "#e8c25a", x + 9, y - 19, 2, 2); }
+  if (L.headphones) { R(ctx, HP, x - 11, y - 38, 22, 2); R(ctx, HP, x - 13, y - 29, 4, 8); R(ctx, HP, x + 9, y - 29, 4, 8); }
 }
 
 function headFront34(ctx, L, s) {
   const { x, y } = s;
-  if (L.style === "hood") { R(ctx, shade(L.outfit.jacket, -0.25), x - 13, y - 33, 25, 25); R(ctx, L.outfit.jacket, x - 12, y - 31, 21, 21); }
-  if (L.style === "bun") R(ctx, L.hair, x - 7, y - 42, 8, 7);
-  R(ctx, s.faceShadow, x - 8, y - 31, 17, 20);
+  if (L.hood) { R(ctx, shade(L.outfit.jacket, -0.25), x - 13, y - 33, 25, 25); R(ctx, L.outfit.jacket, x - 12, y - 31, 21, 21); }
+  if (L.style === "bun" && !L.hood) R(ctx, L.hair, x - 7, y - 42, 8, 7);
+  if (L.style === "long" && !L.hood) R(ctx, L.hair, x - 11, y - 31, 5, 19);
+  R(ctx, s.faceShadow, x - 8, y - 31, 17, L.female ? 17 : 20);
   R(ctx, L.skin, x - 7, y - 32, 15, 18);
   R(ctx, s.faceLight, x - 2, y - 30, 9, 12);
   R(ctx, L.skin, x + 8, y - 24, 2, 3); // mũi nhô ra
   R(ctx, L.skin, x - 11, y - 26, 4, 7); R(ctx, s.faceShadow, x - 10, y - 25, 2, 4); // tai gần
   hairTop(ctx, L, x, y, 1);
-  if (L.style !== "hood") R(ctx, L.hair, x - 9, y - 31, 4, L.style === "bun" ? 10 : 7);
+  if (hasHair(L)) R(ctx, isFade(L) ? buzz(L) : L.hair, x - 9, y - 31, 4, L.female ? 4 : L.style === "bun" ? 10 : 7);
+  if (L.female) R(ctx, "rgba(232, 118, 128, .45)", x + 4, y - 22, 3, 2);
   if (!s.blink) { R(ctx, "#2a1d16", x - 1, y - 25, 3, 2); R(ctx, "#2a1d16", x + 5, y - 25, 2, 2); }
   else R(ctx, "#2a1d16", x - 1, y - 25, 9, 1);
   R(ctx, "#2a1d16", x - 1, y - 27, 4, 1); R(ctx, "#2a1d16", x + 5, y - 27, 3, 1);
   R(ctx, s.faceShadow, x + 4, y - 23, 2, 4);
   mouth(ctx, L, s, x + 1, 5);
-  if (L.style === "beard") { R(ctx, L.hair, x - 5, y - 19, 13, 5); R(ctx, L.hair, x - 3, y - 14, 10, 3); mouth(ctx, L, s, x + 1, 5); }
+  if (L.female && !s.blink) R(ctx, "#2a1d16", x + 7, y - 26, 1, 1);
+  if (L.beard) { R(ctx, L.hair, x - 5, y - 19, 13, 5); R(ctx, L.hair, x - 3, y - 14, 10, 3); mouth(ctx, L, s, x + 1, 5); }
   if (L.glasses && !s.blink) {
     ctx.strokeStyle = "#1b1f1d"; ctx.lineWidth = 1.5;
     ctx.strokeRect(x - 2, y - 27, 6, 5); ctx.strokeRect(x + 4, y - 27, 5, 5);
     R(ctx, "#1b1f1d", x - 8, y - 26, 6, 1);
   }
+  if (L.earrings && !L.hood) R(ctx, "#e8c25a", x - 10, y - 19, 2, 2);
+  if (L.headphones) { R(ctx, HP, x - 9, y - 38, 17, 2); R(ctx, HP, x - 12, y - 29, 4, 8); }
 }
 
 function headSide(ctx, L, s) {
   const { x, y } = s;
-  if (L.style === "hood") { R(ctx, shade(L.outfit.jacket, -0.25), x - 11, y - 33, 21, 25); R(ctx, L.outfit.jacket, x - 10, y - 31, 18, 21); }
-  if (L.style === "bun") R(ctx, L.hair, x - 12, y - 39, 7, 7);
-  R(ctx, s.faceShadow, x - 6, y - 31, 14, 20);
+  if (L.hood) { R(ctx, shade(L.outfit.jacket, -0.25), x - 11, y - 33, 21, 25); R(ctx, L.outfit.jacket, x - 10, y - 31, 18, 21); }
+  if (L.style === "bun" && !L.hood) R(ctx, L.hair, x - 12, y - 39, 7, 7);
+  if (L.style === "long" && !L.hood) R(ctx, L.hair, x - 9, y - 31, 7, 19);
+  R(ctx, s.faceShadow, x - 6, y - 31, 14, L.female ? 17 : 20);
   R(ctx, L.skin, x - 5, y - 32, 13, 18);
   R(ctx, s.faceLight, x + 1, y - 30, 6, 11);
   R(ctx, L.skin, x + 8, y - 25, 2, 3); R(ctx, s.faceShadow, x + 8, y - 22, 1, 1); // mũi
   R(ctx, L.skin, x - 3, y - 26, 4, 6); R(ctx, s.faceShadow, x - 2, y - 25, 2, 4); // tai
-  if (L.style !== "hood") {
+  if (isFade(L)) {
+    R(ctx, buzz(L), x - 7, y - 35, 15, 6);
+    R(ctx, buzz(L), x - 7, y - 31, 4, 7);
+    R(ctx, mixHex(L.skin, L.hair, 0.72), x - 6, y - 37, 13, 2);
+    R(ctx, L.hair, x - 5, y - 39, 12, 3);
+    R(ctx, L.hair, x - 4, y - 40, 10, 1);
+    R(ctx, shade(L.hair, 0.3), x - 3, y - 38, 5, 1);
+  } else if (hasHair(L)) {
     R(ctx, L.hair, x - 7, y - 36, 15, 6);
     R(ctx, L.hair, x - 5, y - 38, 11, 3);
     R(ctx, L.hair, x - 7, y - 31, 4, L.style === "bun" ? 11 : 8);
     if (L.style === "swept") R(ctx, L.hair, x + 3, y - 31, 5, 2);
     R(ctx, shade(L.hair, 0.3), x - 3, y - 37, 4, 1);
+  } else if (!L.hood) {
+    R(ctx, shade(L.skin, 0.08), x - 6, y - 35, 13, 4); // đầu trọc
+    R(ctx, L.hair, x - 7, y - 29, 3, 5);
   }
   if (!s.blink) R(ctx, "#2a1d16", x + 4, y - 25, 2, 2); else R(ctx, "#2a1d16", x + 3, y - 25, 3, 1);
   R(ctx, "#2a1d16", x + 3, y - 27, 4, 1);
   mouth(ctx, L, s, x + 4, 3);
-  if (L.style === "beard") { R(ctx, L.hair, x - 1, y - 20, 9, 6); R(ctx, L.hair, x + 1, y - 15, 6, 3); mouth(ctx, L, s, x + 5, 3); }
+  if (L.female && !s.blink) R(ctx, "#2a1d16", x + 6, y - 26, 1, 1);
+  if (L.female) R(ctx, "rgba(232, 118, 128, .45)", x + 3, y - 22, 3, 2);
+  if (L.beard) { R(ctx, L.hair, x - 1, y - 20, 9, 6); R(ctx, L.hair, x + 1, y - 15, 6, 3); mouth(ctx, L, s, x + 5, 3); }
   if (L.glasses && !s.blink) {
     ctx.strokeStyle = "#1b1f1d"; ctx.lineWidth = 1.5;
     ctx.strokeRect(x + 2, y - 27, 6, 5);
     R(ctx, "#1b1f1d", x - 2, y - 26, 4, 1);
   }
+  if (L.earrings && !L.hood) R(ctx, "#e8c25a", x - 2, y - 20, 2, 2);
+  if (L.headphones) { R(ctx, HP, x - 3, y - 39, 6, 3); R(ctx, HP, x - 4, y - 29, 6, 8); }
 }
 
 function headBack34(ctx, L, s) {
   const { x, y } = s;
-  if (L.style === "hood") {
+  if (L.hood) {
     R(ctx, shade(L.outfit.jacket, -0.25), x - 13, y - 33, 25, 25); R(ctx, L.outfit.jacket, x - 12, y - 31, 22, 21);
     R(ctx, L.skin, x + 6, y - 27, 3, 8);
+    if (L.headphones) R(ctx, HP, x - 8, y - 36, 16, 2);
     return;
   }
+  const H = isFade(L) ? buzz(L) : hasHair(L) ? L.hair : shade(L.skin, 0.05);
   R(ctx, s.faceShadow, x - 8, y - 31, 17, 20);
   R(ctx, L.skin, x + 3, y - 30, 6, 14); // má phía xa
   R(ctx, L.skin, x + 2, y - 26, 4, 6); R(ctx, s.faceShadow, x + 3, y - 25, 2, 4); // tai
-  R(ctx, L.hair, x - 9, y - 36, 17, 6);
-  R(ctx, L.hair, x - 7, y - 38, 13, 3);
-  R(ctx, L.hair, x - 9, y - 31, 11, 15);
-  R(ctx, shade(L.hair, 0.18), x - 6, y - 33, 9, 2);
+  R(ctx, H, x - 9, y - 36, 17, 6);
+  R(ctx, H, x - 7, y - 38, 13, 3);
+  R(ctx, H, x - 9, y - 31, 11, 15);
+  if (L.style === "long") R(ctx, L.hair, x - 10, y - 31, 13, 21);
+  if (isFade(L)) { R(ctx, mixHex(L.skin, L.hair, 0.72), x - 8, y - 36, 15, 2); R(ctx, L.hair, x - 7, y - 39, 13, 3); R(ctx, L.hair, x - 6, y - 40, 11, 1); }
+  else if (hasHair(L)) R(ctx, shade(L.hair, 0.18), x - 6, y - 33, 9, 2);
+  else R(ctx, L.hair, x - 9, y - 27, 11, 4);
   if (L.style === "bun") R(ctx, L.hair, x - 5, y - 42, 8, 7);
-  if (L.style === "beard") R(ctx, L.hair, x + 5, y - 19, 4, 5);
+  if (L.beard) R(ctx, L.hair, x + 5, y - 19, 4, 5);
   if (L.glasses) R(ctx, "#1b1f1d", x + 5, y - 26, 4, 1);
+  if (L.headphones) { R(ctx, HP, x - 8, y - 38, 16, 2); R(ctx, HP, x + 2, y - 29, 4, 8); }
 }
 
 function headBack(ctx, L, s) {
   const { x, y } = s;
-  if (L.style === "hood") { R(ctx, shade(L.outfit.jacket, -0.25), x - 13, y - 33, 26, 25); R(ctx, L.outfit.jacket, x - 11, y - 31, 22, 21); return; }
+  if (L.hood) {
+    R(ctx, shade(L.outfit.jacket, -0.25), x - 13, y - 33, 26, 25); R(ctx, L.outfit.jacket, x - 11, y - 31, 22, 21);
+    if (L.headphones) R(ctx, HP, x - 11, y - 36, 22, 2);
+    return;
+  }
+  const H = isFade(L) ? buzz(L) : hasHair(L) ? L.hair : shade(L.skin, 0.05);
   R(ctx, s.faceShadow, x - 9, y - 31, 18, 20);
-  R(ctx, L.hair, x - 8, y - 33, 16, 18);
-  R(ctx, L.hair, x - 10, y - 29, 4, 12); R(ctx, L.hair, x + 6, y - 29, 4, 12);
-  R(ctx, L.hair, x - 9, y - 36, 18, 6);
-  R(ctx, shade(L.hair, 0.18), x - 6, y - 34, 12, 3);
+  R(ctx, H, x - 8, y - 33, 16, 18);
+  R(ctx, H, x - 10, y - 29, 4, 12); R(ctx, H, x + 6, y - 29, 4, 12);
+  R(ctx, H, x - 9, y - 36, 18, 6);
+  if (L.style === "long") R(ctx, L.hair, x - 11, y - 31, 22, 22);
+  if (isFade(L)) { R(ctx, mixHex(L.skin, L.hair, 0.72), x - 8, y - 36, 16, 2); R(ctx, L.hair, x - 7, y - 39, 14, 3); R(ctx, L.hair, x - 6, y - 40, 12, 1); }
+  else if (hasHair(L)) R(ctx, shade(L.hair, 0.18), x - 6, y - 34, 12, 3);
+  else R(ctx, L.hair, x - 9, y - 27, 18, 4);
   R(ctx, s.faceShadow, x - 11, y - 25, 2, 4); R(ctx, s.faceShadow, x + 9, y - 25, 2, 4);
   if (L.style === "bun") R(ctx, L.hair, x - 4, y - 42, 8, 7);
+  if (L.headphones) { R(ctx, HP, x - 11, y - 38, 22, 2); R(ctx, HP, x - 13, y - 29, 4, 8); R(ctx, HP, x + 9, y - 29, 4, 8); }
 }
 
 function hairTop(ctx, L, x, y, shift) {
-  if (L.style === "hood") return;
+  if (L.hood) return;
+  if (L.style === "bald") {
+    R(ctx, shade(L.skin, 0.08), x - 8 + shift, y - 35, 16, 4);
+    R(ctx, L.hair, x - 9 + shift, y - 30, 2, 4); if (!shift) R(ctx, L.hair, x + 7, y - 30, 2, 4);
+    return;
+  }
+  if (L.style === "fade") {
+    R(ctx, buzz(L), x - 9 + shift, y - 34, 18, 4);                   // hai bên cạo sát
+    R(ctx, mixHex(L.skin, L.hair, 0.72), x - 8 + shift, y - 36, 16, 2); // chuyển màu (fade)
+    R(ctx, L.hair, x - 7 + shift, y - 39, 14, 4);                    // mảng tóc trên đỉnh
+    R(ctx, L.hair, x - 6 + shift, y - 40, 12, 1);
+    R(ctx, shade(L.hair, 0.3), x - 4 + shift, y - 39, 5, 1);
+    return;
+  }
   if (L.style === "bun") {
     R(ctx, L.hair, x - 10 + shift, y - 36, 20, 7);
     if (!shift) { R(ctx, L.hair, x - 10, y - 30, 3, 8); R(ctx, L.hair, x + 7, y - 30, 3, 8); }
@@ -172,7 +279,7 @@ function hairTop(ctx, L, x, y, shift) {
 
 function mouth(ctx, L, s, mx, w) {
   const talking = s.talking && s.tick % 24 < 12;
-  R(ctx, "#7a3f33", mx, s.y - 17, talking ? w + 1 : w, talking ? 3 : 1);
+  R(ctx, L.female ? "#b94a55" : "#7a3f33", mx, s.y - 17, talking ? w + 1 : w, talking ? 3 : L.female ? 2 : 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -180,7 +287,9 @@ function mouth(ctx, L, s, mx, w) {
 // ---------------------------------------------------------------------------
 function legs(ctx, L, s) {
   const { x, y, step, view } = s;
-  const P = L.outfit.pants, shoe = "#1a1d1c";
+  const shoe = "#1a1d1c";
+  // Mặc váy: phần chân lộ ra là tất màu da; quần thì cả ống chân là màu quần.
+  const P = L.skirt ? shade(L.skin, -0.12) : L.outfit.pants;
   ctx.globalAlpha = 1 - s.seat;
   if (view === "side") {
     const far = -step * 1.3, near = step * 1.3;
@@ -196,17 +305,27 @@ function legs(ctx, L, s) {
     R(ctx, P, x - 6, y + 10 + step, 5, 13); R(ctx, P, x + 1, y + 10 - step, 5, 13);
     R(ctx, shoe, x - 7, y + 21 + step, 7, 4); R(ctx, shoe, x + 1, y + 21 - step, 7, 4);
   }
+  // Váy chữ A: phủ lên phần trên của chân (đứng / đi).
+  const SK = L.outfit.pants;
+  if (L.skirt) {
+    if (view === "side") { R(ctx, SK, x - 5, y + 9, 10, 4); R(ctx, SK, x - 6, y + 13, 12, 5); R(ctx, shade(SK, -0.2), x - 6, y + 17, 12, 1); }
+    else if (view === "front34" || view === "back34") { R(ctx, SK, x - 7, y + 9, 14, 4); R(ctx, SK, x - 8, y + 13, 16, 5); R(ctx, shade(SK, -0.2), x + 4, y + 9, 3, 9); }
+    else { R(ctx, SK, x - 8, y + 9, 16, 4); R(ctx, SK, x - 9, y + 13, 18, 5); R(ctx, shade(SK, -0.2), x - 9, y + 17, 18, 1); }
+  }
   // Ngồi: chân bị thân/ghế che khi quay lưng.
   ctx.globalAlpha = s.seat;
+  const T = L.skirt ? SK : P; // đùi: váy hoặc quần
   if (view === "front") {
-    R(ctx, P, x - 8, y + 8, 8, 4); R(ctx, P, x + 1, y + 8, 8, 4);
+    R(ctx, T, x - 9, y + 8, 9, 4); R(ctx, T, x, y + 8, 9, 4);
     R(ctx, P, x - 10, y + 11, 10, 4); R(ctx, P, x + 1, y + 11, 10, 4);
+    if (L.skirt) R(ctx, SK, x - 10, y + 10, 21, 2);
     R(ctx, shoe, x - 11, y + 13, 8, 4); R(ctx, shoe, x + 3, y + 13, 8, 4);
   } else if (view === "front34") {
-    R(ctx, P, x - 6, y + 8, 11, 4); R(ctx, P, x, y + 10, 11, 4);
+    R(ctx, T, x - 6, y + 8, 11, 4); R(ctx, P, x, y + 10, 11, 4);
+    if (L.skirt) R(ctx, SK, x - 6, y + 9, 14, 3);
     R(ctx, shoe, x + 4, y + 12, 7, 4); R(ctx, shoe, x + 9, y + 14, 7, 4);
   } else if (view === "side") {
-    R(ctx, P, x - 3, y + 8, 13, 5); R(ctx, P, x + 7, y + 8, 4, 10); R(ctx, shoe, x + 7, y + 16, 7, 3);
+    R(ctx, T, x - 3, y + 8, 13, 5); R(ctx, P, x + 7, y + 10, 4, 8); R(ctx, shoe, x + 7, y + 16, 7, 3);
   }
   ctx.globalAlpha = 1;
 }
@@ -215,27 +334,36 @@ function torso(ctx, L, s) {
   const { x, y, view } = s;
   const O = L.outfit;
   const h = 20 - Math.round(s.seat * 4);
+  const F = L.female;
   if (view === "side") {
-    R(ctx, O.jacket, x - 5, y - 8, 11, h);
+    R(ctx, O.jacket, x - 5, y - 8, F ? 10 : 11, h);
     R(ctx, shade(O.jacket, -0.2), x - 5, y - 8, 2, h);
     R(ctx, O.shirt, x + 4, y - 7, 2, 9);
     return;
   }
   if (view === "front34" || view === "back34") {
-    R(ctx, O.jacket, x - 8, y - 8, 16, h);
-    R(ctx, shade(O.jacket, -0.2), x + 5, y - 8, 3, h);
+    if (F) { R(ctx, O.jacket, x - 7, y - 8, 15, 9); R(ctx, O.jacket, x - 6, y + 1, 13, h - 9); }
+    else R(ctx, O.jacket, x - 8, y - 8, 16, h);
+    R(ctx, shade(O.jacket, -0.2), x + 5, y - 8, F ? 2 : 3, h);
     if (view === "front34") {
       R(ctx, O.shirt, x - 1, y - 7, 6, 15 - Math.round(s.seat * 3));
       if (L.tie) { R(ctx, O.trim, x + 1, y - 6, 2, 9); R(ctx, O.trim, x, y + 2, 4, 2); }
+      else if (L.hood) { R(ctx, O.trim, x + 1, y - 6, 1, 6); R(ctx, O.trim, x + 4, y - 6, 1, 6); }
+      else if (L.shirtOnly) { R(ctx, shade(O.jacket, -0.15), x + 2, y - 6, 1, 13); R(ctx, shade(O.jacket, 0.18), x - 1, y - 8, 7, 2); }
       else R(ctx, O.trim, x - 3, y - 6, 2, 13);
+      if (L.lanyard) { R(ctx, "#3f8fd8", x, y - 8, 1, 7); R(ctx, "#3f8fd8", x + 5, y - 8, 1, 7); R(ctx, "#f4f6fa", x + 1, y - 1, 5, 6); R(ctx, "#3f8fd8", x + 1, y - 1, 5, 1); }
     } else R(ctx, shade(O.jacket, -0.15), x, y - 6, 2, 14);
     return;
   }
-  R(ctx, O.jacket, x - 9, y - 8, 18, h);
+  if (F) { R(ctx, O.jacket, x - 8, y - 8, 16, 9); R(ctx, O.jacket, x - 7, y + 1, 14, h - 9); }
+  else R(ctx, O.jacket, x - 9, y - 8, 18, h);
   if (view === "back") { R(ctx, shade(O.jacket, -0.15), x - 1, y - 6, 2, 14); return; }
   R(ctx, O.shirt, x - 4, y - 7, 8, 15 - Math.round(s.seat * 3));
   if (L.tie) { R(ctx, O.trim, x - 1, y - 6, 2, 9); R(ctx, O.trim, x - 2, y + 2, 4, 2); }
+  else if (L.hood) { R(ctx, O.trim, x - 3, y - 6, 1, 6); R(ctx, O.trim, x + 2, y - 6, 1, 6); }
+  else if (L.shirtOnly) { R(ctx, shade(O.jacket, -0.15), x - 1, y - 6, 1, 13); R(ctx, shade(O.jacket, 0.18), x - 5, y - 8, 10, 2); }
   else { R(ctx, O.trim, x - 8, y - 6, 2, 13); R(ctx, O.trim, x + 6, y - 6, 2, 13); }
+  if (L.lanyard) { R(ctx, "#3f8fd8", x - 4, y - 8, 1, 7); R(ctx, "#3f8fd8", x + 3, y - 8, 1, 7); R(ctx, "#f4f6fa", x - 2, y - 1, 5, 6); R(ctx, "#3f8fd8", x - 2, y - 1, 5, 1); }
 }
 
 // Tay phía xa: vẽ trước thân (bị thân che một phần).
@@ -355,6 +483,17 @@ function heldItem(ctx, s) {
   } else if (holding === "book") {
     R(ctx, "#4f7cac", view === "side" ? x + 3 : x - 6, y - 4, view === "side" ? 8 : 12, 9);
     R(ctx, "#f1f0e8", view === "side" ? x + 4 : x - 5, y - 3, view === "side" ? 6 : 10, 1);
+  } else if (holding === "cig") {
+    // Thỉnh thoảng đưa lên miệng rít một hơi.
+    const puff = Math.sin(tick * 0.035) > 0.75;
+    const cx = puff ? (view === "side" ? x + 6 : x + 3) : hx, cy = puff ? y - 17 : y + 1;
+    R(ctx, "#f4f4f0", cx, cy, 5, 1);
+    R(ctx, "#d9a25a", cx, cy, 1, 1);
+    R(ctx, tick % 20 < 10 ? "#ff6a3a" : "#e0473a", cx + 5, cy, 1, 1);
+    ctx.save();
+    ctx.globalAlpha = 0.45;
+    for (let i = 1; i <= 5; i++) R(ctx, "#e4e8ee", cx + 5 + Math.round(Math.sin(tick * 0.08 + i) * 1.5), cy - i * 3, 1, 2);
+    ctx.restore();
   }
 }
 
@@ -362,7 +501,7 @@ const HEADS = { front: headFront, front34: headFront34, side: headSide, back34: 
 
 export function drawAgent(agent, p, tick) {
   const ctx = getContext();
-  const L = LOOKS[agent.id];
+  const L = lookOf(agent);
   const [view, flip] = VIEWS[agent.facing] || VIEWS.S;
   const moving = agent.moving;
   const step = moving ? Math.sin(tick * 0.22) * 3 : 0;
@@ -404,8 +543,6 @@ export function drawAgent(agent, p, tick) {
 // ---------------------------------------------------------------------------
 // Bảng tên + bong bóng thoại
 // ---------------------------------------------------------------------------
-const ROLE_COLOR = { manager: "#d9b44a", analyst: "#b48ad6", quant: "#75d899", risk: "#e59a6b" };
-export const roleColor = id => ROLE_COLOR[id];
 
 function wrap(ctx, text, maxWidth, maxLines = 3) {
   const words = text.split(/\s+/);
@@ -441,16 +578,19 @@ export function drawOverlay(agent, p, bubble, taken = []) {
   ctx.font = `bold 10px ${FONT}`;
   ctx.textAlign = "center";
   ctx.textBaseline = "alphabetic";
-  const nameW = ctx.measureText(agent.name).width;
-  const nameTop = place(taken, x - nameW / 2 - 6, headTop - 15, nameW + 12, 14);
-  ctx.fillStyle = "rgba(5,14,9,.88)";
-  ctx.beginPath();
-  ctx.roundRect(x - nameW / 2 - 6, nameTop, nameW + 12, 14, 7);
-  ctx.fill();
-  ctx.fillStyle = ROLE_COLOR[agent.id];
-  ctx.fillRect(x - nameW / 2 - 3, nameTop + 5, 4, 4);
-  ctx.fillStyle = "#e6f3e6";
-  ctx.fillText(agent.name, x + 3, nameTop + 10.5);
+  let nameTop = headTop - 15;
+  if (agent.name) {
+    const nameW = ctx.measureText(agent.name).width;
+    nameTop = place(taken, x - nameW / 2 - 6, headTop - 15, nameW + 12, 14);
+    ctx.fillStyle = "rgba(255,255,255,.95)";
+    ctx.beginPath();
+    ctx.roundRect(x - nameW / 2 - 6, nameTop, nameW + 12, 14, 7);
+    ctx.fill();
+    ctx.fillStyle = agent.color || "#8eb1fc";
+    ctx.fillRect(x - nameW / 2 - 3, nameTop + 5, 4, 4);
+    ctx.fillStyle = "#14233f";
+    ctx.fillText(agent.name, x + 3, nameTop + 10.5);
+  }
 
   if (!bubble) return;
   ctx.font = `600 10px ${FONT}`;
@@ -460,8 +600,8 @@ export function drawOverlay(agent, p, bubble, taken = []) {
   const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + 14;
   const h = lines.length * 12 + 7;
   const top = place(taken, x - w / 2, nameTop - 5 - h, w, h + 4);
-  ctx.fillStyle = bubble.tone === "error" ? "rgba(48,12,12,.96)" : bubble.tone === "speech" ? "rgba(250,250,240,.97)" : "rgba(7,18,12,.95)";
-  ctx.strokeStyle = bubble.tone === "error" ? "#e0675a" : bubble.tone === "work" ? "#c5df76" : bubble.tone === "speech" ? "#c9cfc0" : "#75d899";
+  ctx.fillStyle = bubble.tone === "error" ? "rgba(253,236,234,.97)" : bubble.tone === "speech" ? "rgba(255,255,255,.98)" : "rgba(255,255,255,.97)";
+  ctx.strokeStyle = bubble.tone === "error" ? "#e0675a" : bubble.tone === "work" ? "#c99a1c" : bubble.tone === "speech" ? "#c0c8d4" : "#5288fb";
   ctx.lineWidth = 1;
   ctx.beginPath();
   ctx.roundRect(x - w / 2, top, w, h, 5);
@@ -473,6 +613,6 @@ export function drawOverlay(agent, p, bubble, taken = []) {
   ctx.lineTo(x + 4, top + h);
   ctx.fillStyle = ctx.strokeStyle;
   ctx.fill();
-  ctx.fillStyle = bubble.tone === "speech" ? "#1d2620" : "#eef8ea";
+  ctx.fillStyle = bubble.tone === "speech" ? "#1d222c" : "#14233f";
   lines.forEach((l, i) => ctx.fillText(l, x, top + 12 + i * 12));
 }

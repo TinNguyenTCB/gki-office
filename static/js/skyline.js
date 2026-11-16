@@ -9,6 +9,7 @@
 // đoàn tàu chạy được vẽ trực tiếp giữa hai lớp đó nên bị nhà phía trước che đúng thứ tự.
 
 import { ISO, project } from "./iso.js";
+import { FLOOR, PLAN } from "./floorplan.js";
 import { getLang } from "./i18n.js";
 
 const GZ = -420;          // cao độ mặt đất thành phố (sàn văn phòng = 0)
@@ -16,10 +17,16 @@ const HORIZON = -1500;    // giới hạn độ sâu (x + y) của thành phố 
 const SPAN = [-1500, 1700];
 const LOT = 150, LOT_IN = 110; // ô phố 150, trong đó 110 là đất xây dựng, 40 là đường
 const HW = { y: -560, x: -560, z: GZ + 52 }; // hai đường cao tốc trên cao (dọc trục x và trục y)
-const OFFICE = { x0: 24, x1: 536, y0: 24, y1: 536 };
-const GREEN = "#75d899";
-const FILL = "rgba(8, 18, 12, 0.97)";
-const TEXT = "#9fe6b4";
+// Khối toà nhà = mặt bằng tầng đang xem (tầng 9 chữ L: khuyết góc trước x > nx, y > ny; tầng 6 chữ nhật).
+let OFFICE = { x0: 24, x1: 686, y0: 24, y1: 766, nx: 380, ny: 300 };
+function officeBox() {
+  const nx = PLAN.notchX >= PLAN.outerMaxX ? PLAN.outerMaxX : PLAN.notchX;
+  const ny = PLAN.notchY >= PLAN.outerMaxY ? PLAN.outerMaxY : PLAN.notchY;
+  return { x0: PLAN.outer, x1: PLAN.outerMaxX, y0: PLAN.outer, y1: PLAN.outerMaxY, nx, ny };
+}
+const GREEN = "#ffffff";
+const FILL = "rgba(44, 84, 172, 0.97)";
+const TEXT = "#ffffff";
 // Độ sáng chung của phong cảnh (1 = như thiết kế gốc). Giảm để cảnh nền dịu hơn, không giành sự chú ý của văn phòng.
 const DIM = 0.55;
 const K = Math.hypot(ISO.kx, ISO.ky);
@@ -168,29 +175,36 @@ function highways() {
   return out;
 }
 
-// Toà cao ốc chứa văn phòng: hai mặt kính kéo từ sàn (z = -14) xuống mặt đất.
+// Toà cao ốc chứa văn phòng (mặt bằng chữ L): bốn mặt nhìn thấy kéo từ sàn (z = -14) xuống mặt đất.
+// Đường viền phía trước: (x0,y1) → (nx,y1) → (nx,ny) → (x1,ny) → (x1,y0) – đơn điệu theo chiều ngang màn hình,
+// nên phần mặt tiền là hình nằm giữa đường viền ở cao độ sàn và chính nó ở mặt đất.
 function officeTower() {
   const P = piece(1e9, { alpha: 0.42, width: 0.85, group: "front" });
-  const { x0, x1, y0, y1 } = OFFICE, top = -14;
-  P.shape([S(x0, y1, top), S(x1, y1, top), S(x1, y0, top), S(x1, y0, GZ), S(x1, y1, GZ), S(x0, y1, GZ)]);
-  P.line(S(x1, y1, top), S(x1, y1, GZ));
-  for (let z = top - 30; z > GZ + 40; z -= 30) {
-    P.line(S(x0, y1, z), S(x1, y1, z));
-    P.line(S(x1, y1, z), S(x1, y0, z));
+  const { x0, x1, y0, y1, nx, ny } = OFFICE, top = -14;
+  const path = [[x0, y1], [nx, y1], [nx, ny], [x1, ny], [x1, y0]];
+  P.shape([...path.map(([x, y]) => S(x, y, top)), ...path.slice().reverse().map(([x, y]) => S(x, y, GZ))]);
+  for (const [x, y] of path.slice(1, -1)) P.line(S(x, y, top), S(x, y, GZ));
+  const along = (z) => P.path(path.map(([x, y]) => S(x, y, z)));
+  for (let z = top - 30; z > GZ + 40; z -= 30) along(z);
+  along(GZ + 40); // sảnh tầng trệt
+  // Ô kính dọc trên từng mặt
+  for (let i = 0; i < path.length - 1; i++) {
+    const [ax, ay] = path[i], [bx, by] = path[i + 1];
+    const len = Math.hypot(bx - ax, by - ay), n = Math.round(len / 32);
+    for (let k = 1; k < n; k++) {
+      const f = k / n;
+      P.line(S(ax + (bx - ax) * f, ay + (by - ay) * f, top - 4), S(ax + (bx - ax) * f, ay + (by - ay) * f, GZ + 40));
+    }
   }
-  for (let u = x0 + 32; u < x1; u += 32) P.line(S(u, y1, top - 4), S(u, y1, GZ + 40));
-  for (let v = y0 + 32; v < y1; v += 32) P.line(S(x1, v, top - 4), S(x1, v, GZ + 40));
-  // sảnh tầng trệt
-  P.line(S(x0, y1, GZ + 40), S(x1, y1, GZ + 40));
-  P.line(S(x1, y1, GZ + 40), S(x1, y0, GZ + 40));
-  P.shape([S(250, y1, GZ), S(310, y1, GZ), S(310, y1, GZ + 30), S(250, y1, GZ + 30)], false);
-  P.line(S(280, y1, GZ), S(280, y1, GZ + 30));
+  // Cửa chính tầng trệt – ngay dưới lối vào học viên
+  P.shape([S(330, y1, GZ), S(390, y1, GZ), S(390, y1, GZ + 30), S(330, y1, GZ + 30)], false);
+  P.line(S(360, y1, GZ), S(360, y1, GZ + 30));
   return P;
 }
 
 // Biển dọc treo ở góc phải toà nhà (kiểu biển hiệu phố Nhật): tấm bảng chìa chéo 45° ra khỏi cạnh góc,
 // nên mặt bảng quay thẳng về phía người xem – chữ xếp dọc, không bị nghiêng.
-const SIGN_TEXT = { vi: "MINI CAPITAL", en: "MINI CAPITAL", ja: "ミニキャピタル" };
+const SIGN_TEXT = { vi: "GKI", en: "GKI", ja: "GKI" };
 function towerSign(lang) {
   const P = piece(1e9 + 1, { alpha: 1, width: 1.1, glow: 0.3, group: "front" });
   const { x1, y0 } = OFFICE;
@@ -220,7 +234,7 @@ function towerSign(lang) {
 // ---------------------------------------------------------------------------
 // Khu phố chung: mỗi ô đất 1–4 toà nhà hình hộp.
 // ---------------------------------------------------------------------------
-const OFFICE_SCREEN = { x0: 40, x1: 580 }; // bề ngang màn hình mà toà văn phòng chiếm
+const OFFICE_SCREEN = { x0: -58, x1: 638 }; // bề ngang màn hình mà toà văn phòng chiếm (cập nhật theo tầng)
 
 // Khối nằm trước toà văn phòng (theo thứ tự vẽ isometric) và chồng lên nó trên màn hình -> bỏ, kẻo che văn phòng.
 function inFrontOfOffice(x0, y0, x1, y1) {
@@ -680,7 +694,7 @@ function paintTexts(ctx, P) {
 function fadeStroke(ctx) {
   const far = S(0, HORIZON + 150, GZ)[1], near = S(0, HORIZON + 900, GZ)[1];
   const g = ctx.createLinearGradient(0, far, 0, near);
-  g.addColorStop(0, "rgba(117,216,153,0)");
+  g.addColorStop(0, "rgba(255, 255, 255, 0)");
   g.addColorStop(1, GREEN);
   return g;
 }
@@ -749,10 +763,16 @@ function cached(slot, ctx, key, draw) {
 
 export function drawSkyline(ctx, tick) {
   const lang = getLang();
-  let c = cache.get(lang);
-  if (!c) { c = build(lang); cache.set(lang, c); }
+  const ck = `${lang}|${FLOOR}`;
+  let c = cache.get(ck);
+  if (!c) {
+    OFFICE = officeBox();
+    const P = (x, y) => (x - y) * ISO.kx + ISO.originX;
+    OFFICE_SCREEN.x0 = P(OFFICE.x0, OFFICE.y1) - ISO.originX - 2; OFFICE_SCREEN.x1 = P(OFFICE.x1, OFFICE.y0) - ISO.originX + 2;
+    c = build(lang); cache.set(ck, c);
+  }
   const m = ctx.getTransform();
-  const key = `${lang}|${ctx.canvas.width}x${ctx.canvas.height}|${m.a.toFixed(4)}|${m.e.toFixed(1)}|${m.f.toFixed(1)}`;
+  const key = `${lang}|${FLOOR}|${ctx.canvas.width}x${ctx.canvas.height}|${m.a.toFixed(4)}|${m.e.toFixed(1)}|${m.f.toFixed(1)}`;
 
   cached("back", ctx, key, cx => {
     for (const P of c.back) paint(cx, P);

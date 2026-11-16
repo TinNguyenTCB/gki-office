@@ -51,7 +51,7 @@ export function playIntro() {
 // ---------------------------------------------------------------------------
 // Đơn cam kết
 // ---------------------------------------------------------------------------
-const newDocNo = d => `${t("pledge.no")} MC-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${Math.floor(1000 + Math.random() * 9000)}`;
+const newDocNo = d => `${t("pledge.no")} GKI-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}-${Math.floor(1000 + Math.random() * 9000)}`;
 
 function cleanName(raw) {
   return raw.replace(/\s+/g, " ").trim();

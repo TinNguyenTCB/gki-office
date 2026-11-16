@@ -1,17 +1,29 @@
-# Mini Capital – Văn phòng AI nghiên cứu & quản lý cổ phiếu
+# GKI – Trung tâm đào tạo CNTT vận hành bởi đội ngũ AI
 
-Văn phòng isometric nơi 4 nhân viên AI (CrewAI) làm việc thật cho khách hàng:
-**Chuyên viên phân tích → Chuyên viên định lượng → Quản trị rủi ro → Giám đốc đầu tư** (ký báo cáo).
+Văn phòng isometric (tầng 9) nơi đội ngũ AI (CrewAI) của một trung tâm đào tạo CNTT làm việc thật cho khách hàng.
 Mọi chuyển động trong văn phòng phản ánh tiến độ thật của các agent.
 
-> ⚠️ Báo cáo do AI tạo, chỉ mang tính tham khảo – không phải tư vấn đầu tư. AI không có dữ liệu thị trường thời gian thực.
+**Loại nhiệm vụ** (chọn khi giao việc):
+
+| Loại | Ai làm | Kết quả |
+|---|---|---|
+| Thiết kế khoá học | các thành viên được chọn → Giám đốc đào tạo | Đề cương khoá học |
+| Tư vấn lộ trình | các thành viên được chọn → Giám đốc đào tạo | Lộ trình học tập cá nhân |
+| Buổi dạy | giảng viên đứng bục giảng, trợ lý ngồi cuối lớp, học viên (mặc suit) từ lối vào vào lớp → Giám đốc duyệt | Giáo án buổi học |
+
+**Đội ngũ**: thêm / xoá nhân viên, đổi tên, vai trò (thiết kế chương trình, giảng viên, tư vấn, khảo thí, trợ giảng, tuyển sinh),
+tuỳ chỉnh ngoại hình (màu da, kiểu & màu tóc, trang phục, phụ kiện). Mỗi người có **bàn mặc định** và **bàn làm việc**:
+bật “Chế độ làm việc” (hoặc khi đang tham gia nhiệm vụ) thì chuyển sang bàn làm việc.
+Nhân viên mới tham gia đội AI theo vai trò của mình.
+
+> ⚠️ Tài liệu do AI soạn, chỉ mang tính tham khảo – cần người có chuyên môn rà soát trước khi sử dụng.
 
 ## Xem thử trên GitHub Pages
 
 **https://tinnguyentcb.github.io/ai-mini-office/**
 
 GitHub Pages chỉ chạy được phần giao diện, nên bản này là **bản xem thử**: có đủ văn phòng, màn chào, Đơn cam kết,
-sắp xếp nội thất; nút “Giao việc” chạy **mô phỏng** với dữ liệu hư cấu (không gọi AI).
+sắp xếp nội thất, hồ sơ nhân viên; nút “Giao việc” chạy **mô phỏng** với nội dung ví dụ (không gọi AI).
 
 ## Chạy đầy đủ trên máy (có AI thật)
 
@@ -45,11 +57,14 @@ thay vì trộn file cũ với file mới.
 
 | File | Vai trò |
 |---|---|
-| `main.py` | Backend FastAPI + CrewAI, phát trạng thái qua WebSocket |
-| `static/js/sim.js` | Mô phỏng nhân viên: đi lại, làm việc, giải lao, bàn giao |
-| `static/js/characters.js` | Nhân vật pixel 8 hướng |
-| `static/js/furniture.js` | Nội thất dựng khối 3D, xoay được |
+| `main.py` | Backend FastAPI + CrewAI (đội ngũ động theo vai trò), phát trạng thái qua WebSocket |
+| `static/js/roles.js` | Vai trò, loại nhiệm vụ, mô tả công việc (3 ngôn ngữ) |
+| `static/js/team.js` | Hồ sơ nhân viên: tên, vai trò, ngoại hình, bàn mặc định / bàn làm việc |
+| `static/js/sim.js` | Mô phỏng: đi lại, làm việc, giải lao, bàn giao, buổi dạy & học viên |
+| `static/js/characters.js` | Nhân vật pixel 8 hướng, ngoại hình tuỳ chỉnh |
+| `static/js/furniture.js` | Nội thất dựng khối 3D, xoay được (bục giảng, tủ lạnh mini, lò vi sóng…) |
+| `static/js/floorplan.js` | Mặt bằng chữ L tầng 9: phòng, vách, cửa |
 | `static/js/pathfinding.js` | Tìm đường A* né đồ đạc |
-| `static/js/dialogue.js` | Lời thoại theo từng vị trí |
+| `static/js/dialogue.js` | Lời thoại theo vai trò |
 | `static/js/onboarding.js` | Màn chào + Đơn cam kết (ký tên, đóng mộc) |
 | `static/js/demo.js` | Chế độ mô phỏng không tốn API |

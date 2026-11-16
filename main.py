@@ -1,7 +1,10 @@
-"""Mini Capital – văn phòng AI nghiên cứu & quản lý cổ phiếu (backend).
+"""GKI – trung tâm đào tạo CNTT vận hành bởi đội ngũ AI (backend).
 
-Bốn agent CrewAI làm việc tuần tự cho từng khách hàng:
-    Chuyên viên phân tích -> Chuyên viên định lượng -> Quản trị rủi ro -> Giám đốc đầu tư (ký báo cáo)
+Người dùng chọn LOẠI NHIỆM VỤ và THÀNH VIÊN tham gia; mỗi thành viên là một agent CrewAI với vai trò riêng,
+làm việc tuần tự, cuối cùng Giám đốc đào tạo tổng hợp và ký duyệt:
+    course  : thiết kế khoá học        -> Đề cương khoá học
+    roadmap : tư vấn lộ trình học viên -> Lộ trình học tập cá nhân
+    lesson  : buổi dạy trên lớp        -> Giáo án + bài giảng (giảng viên dạy, trợ lý ngồi cuối lớp)
 
 Mọi trạng thái gửi xuống trình duyệt đều đến từ sự kiện thật của CrewAI
 (TaskStarted / TaskCompleted / LLMCall...), không phải kịch bản dựng sẵn.
@@ -22,7 +25,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from crewai import LLM, Agent, Crew, Process, Task
 from crewai.events import (
@@ -33,12 +36,10 @@ from crewai.events import (
     TaskStartedEvent,
     crewai_event_bus,
 )
-from crewai.events.types.tool_usage_events import ToolUsageErrorEvent, ToolUsageStartedEvent
-
-from market_tools import FinancialStatementsTool, StockSnapshotTool, data_tools_available
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -46,7 +47,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="AI Mini Office", lifespan=lifespan)
+app = FastAPI(title="GKI AI Training Office", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 # Chỉ cho phép trang chạy trên máy này (vd. VS Code Live Server) gọi API – không mở "*".
 app.add_middleware(
@@ -72,7 +73,7 @@ MODELS: dict[str, dict[str, str]] = {
     "claude-haiku-5-5": {"label": "Claude Haiku 5.5", "model": "anthropic/claude-haiku-5-5", "env": "ANTHROPIC_API_KEY"},
 }
 # Mặc định = model đầu tiên trong danh sách ưu tiên mà .env có API key.
-# Claude đứng đầu: Sonnet làm Giám đốc đầu tư (viết báo cáo cuối cần chất lượng), Haiku cho đội thực thi (nhanh, rẻ).
+# Claude đứng đầu: Sonnet làm Giám đốc (tổng hợp tài liệu cuối cần chất lượng), Haiku cho đội thực thi (nhanh, rẻ).
 LEADER_PREFERENCE = ["claude-sonnet-5-5", "gemini-3.5-flash", "gemini-3.8-flash", "gpt-5.4-mini"]
 TEAM_PREFERENCE = ["claude-haiku-5-5", "gemini-3.1-flash-lite", "gemini-3.5-flash", "gpt-5.4-mini"]
 
@@ -104,15 +105,10 @@ def build_llm(key: str) -> LLM:
 # ---------------------------------------------------------------------------
 # Trạng thái văn phòng + phát sóng WebSocket
 # ---------------------------------------------------------------------------
-STAFF_IDS = ("manager", "analyst", "quant", "risk")
-
-
 class Office:
     def __init__(self) -> None:
         self.connections: set[WebSocket] = set()
-        self.agents: dict[str, dict[str, str]] = {
-            sid: {"status": "idle", "message": "Đang chờ việc."} for sid in STAFF_IDS
-        }
+        self.agents: dict[str, dict[str, str]] = {}
         self.busy = False
         self.result: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -160,37 +156,160 @@ def short(text: Any, limit: int = 90) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Đội ngũ & công việc
+# Vai trò & công việc. Prompt viết bằng tiếng Việt; ngôn ngữ ĐẦU RA theo lựa chọn của người dùng.
 # ---------------------------------------------------------------------------
-DATA_RULES_OFFLINE = (
-    "QUY TẮC DỮ LIỆU: Bạn KHÔNG có dữ liệu thị trường thời gian thực. Chỉ dùng kiến thức bạn chắc chắn, "
-    "luôn ghi rõ mốc thời gian của số liệu (vd. 'theo BCTC 2024'), đánh dấu rõ số nào là ƯỚC TÍNH, "
-    "và tuyệt đối không bịa giá cổ phiếu hay số liệu tài chính. Nếu không chắc, hãy nói là không chắc."
+Kind = Literal["course", "roadmap", "lesson"]
+Role = Literal["director", "headta", "curriculum", "teacher", "sensei", "advisor", "qa", "ta", "admissions", "secretary", "clerklead", "clerk"]
+
+ROLES: dict[str, dict[str, Any]] = {
+    "director": {
+        "role": "Giám đốc đào tạo kiêm giảng viên",
+        "goal": "Tổng hợp, thẩm định và ký duyệt tài liệu đào tạo gửi khách hàng; khi cần thì trực tiếp đứng lớp",
+        "backstory": "Giám đốc đào tạo CNTT nhiều năm kinh nghiệm, vẫn trực tiếp đứng lớp; đặt chất lượng học tập và quyền lợi học viên lên trên hết, viết rõ ràng, trung thực.",
+    },
+    "curriculum": {
+        "role": "Chuyên viên thiết kế chương trình",
+        "goal": "Thiết kế chương trình đào tạo CNTT có mục tiêu rõ ràng, đo lường được và sát nhu cầu thực tế",
+        "backstory": "Chuyên gia thiết kế chương trình học, quen các khung năng lực CNTT phổ biến và phương pháp học qua dự án.",
+        "course": ("Thiết kế khung chương trình: mục tiêu đầu ra (đo lường được), đối tượng & điều kiện đầu vào, "
+                   "danh sách module/buổi học theo tuần, thời lượng, dự án cuối khoá.",
+                   "Khung chương trình dạng bảng: tuần / chủ đề / mục tiêu / thời lượng, kèm dự án cuối khoá."),
+        "roadmap": ("Đề xuất lộ trình các khoá học/chủ đề theo thứ tự hợp lý cho học viên này, kèm thời lượng ước tính "
+                    "và điều kiện tiên quyết của từng chặng.",
+                    "Lộ trình theo chặng (chặng / nội dung / thời lượng / điều kiện tiên quyết)."),
+    },
+    "teacher": {
+        "role": "Giảng viên CNTT",
+        "goal": "Biến nội dung kỹ thuật thành bài giảng dễ hiểu, có ví dụ và bài thực hành sát thực tế",
+        "backstory": "Giảng viên lập trình đứng lớp lâu năm, giải thích từ dễ tới khó, luôn có ví dụ code chạy được.",
+        "course": ("Soạn nội dung chi tiết cho 2–3 buổi học tiêu biểu của khoá: lý thuyết trọng tâm, ví dụ code, "
+                   "bài thực hành có hướng dẫn.",
+                   "Nội dung mẫu cho các buổi học tiêu biểu, kèm ví dụ code và bài thực hành."),
+        "roadmap": ("Đánh giá kỹ năng kỹ thuật cần bổ sung để học viên đạt mục tiêu; gợi ý bài tập/dự án nhỏ "
+                    "cho từng chặng để tự kiểm tra.",
+                    "Danh sách kỹ năng cần bổ sung + bài tập/dự án nhỏ theo chặng."),
+    },
+    "advisor": {
+        "role": "Chuyên viên tư vấn học tập",
+        "goal": "Hiểu đúng nhu cầu, hoàn cảnh của người học và tư vấn lựa chọn phù hợp, thực tế",
+        "backstory": "Chuyên viên tư vấn học tập & nghề nghiệp CNTT, lắng nghe kỹ và không hứa hẹn quá mức.",
+        "course": ("Phân tích chân dung học viên mục tiêu: nền tảng, động lực, khó khăn thường gặp; đề xuất hình thức học "
+                   "(online/offline, lịch học), cách hỗ trợ và giữ chân học viên.",
+                   "Chân dung học viên mục tiêu + đề xuất hình thức tổ chức lớp và hỗ trợ học viên."),
+        "roadmap": ("Phân tích hồ sơ học viên: nền tảng hiện tại, mục tiêu nghề nghiệp, quỹ thời gian; xác định khoảng cách "
+                    "năng lực và vị trí việc làm phù hợp tại thị trường.",
+                    "Phân tích hồ sơ, khoảng cách năng lực và định hướng nghề nghiệp phù hợp."),
+    },
+    "qa": {
+        "role": "Chuyên viên khảo thí & chất lượng",
+        "goal": "Đảm bảo nội dung đào tạo chính xác, đánh giá được và đạt chuẩn chất lượng",
+        "backstory": "Chuyên viên khảo thí kỹ tính, soi từng mục tiêu học tập xem có đo được không và nội dung có lỗi thời không.",
+        "course": ("Thiết kế cách đánh giá: tiêu chí đạt của từng module, bài kiểm tra, rubric chấm dự án cuối khoá; "
+                   "rà soát lỗi kỹ thuật hoặc nội dung lỗi thời trong phần của đồng đội.",
+                   "Kế hoạch đánh giá + rubric chấm dự án + danh sách điểm cần sửa."),
+        "roadmap": ("Đề xuất mốc kiểm tra năng lực sau mỗi chặng (tiêu chí đạt, bài test gợi ý) và các chứng chỉ "
+                    "quốc tế/phổ biến phù hợp (nếu có, ghi rõ có thể đã thay đổi).",
+                    "Mốc kiểm tra theo chặng + chứng chỉ gợi ý."),
+    },
+    "ta": {
+        "role": "Trợ giảng",
+        "goal": "Hỗ trợ học viên thực hành, giải đáp thắc mắc và chuẩn bị tài liệu bổ trợ",
+        "backstory": "Trợ giảng nhiệt tình, hiểu những lỗi người mới hay gặp và cách gỡ rối từng bước.",
+        "course": ("Soạn bộ câu hỏi thường gặp, lỗi hay gặp khi thực hành và tài liệu đọc thêm cho khoá học.",
+                   "FAQ + lỗi thường gặp & cách sửa + tài liệu đọc thêm."),
+        "roadmap": ("Gợi ý thói quen học, công cụ, cộng đồng và tài nguyên miễn phí giúp học viên tự học hiệu quả theo lộ trình.",
+                    "Danh sách tài nguyên, công cụ và lịch tự học gợi ý."),
+    },
+    "headta": {
+        "role": "Trợ giảng chính",
+        "goal": "Giữ cho lớp học vận hành trơn tru: học liệu, hậu cần, hồ sơ và hỗ trợ học viên",
+        "backstory": "Trợ giảng chính chu đáo, quản lý học liệu và hồ sơ lớp, nắm rõ những gì học viên cần để học tốt.",
+        "course": ("Chuẩn bị danh sách học liệu, checklist tổ chức lớp (phòng, thiết bị, tài khoản phần mềm), quy trình "
+                   "điểm danh, kênh hỗ trợ học viên ngoài giờ.",
+                   "Danh sách học liệu + checklist tổ chức lớp + quy trình hỗ trợ học viên."),
+        "roadmap": ("Lập lịch học chi tiết theo tuần cho học viên, các mốc nộp bài/nhắc nhở và cách liên hệ khi cần hỗ trợ.",
+                    "Lịch học theo tuần + mốc nhắc nhở + kênh hỗ trợ."),
+    },
+    "sensei": {
+        "role": "Thầy giáo",
+        "goal": "Giảng dạy dễ hiểu, kèm cặp và định hướng học viên tiến bộ",
+        "backstory": "Thầy giáo CNTT tận tâm, giải thích bằng ví dụ đời thường và theo sát từng học viên.",
+        "course": ("Soạn nội dung chi tiết cho các buổi học tiêu biểu, ví dụ thực tế và cách kèm cặp học viên yếu.",
+                   "Nội dung buổi học tiêu biểu + ví dụ + phương pháp kèm cặp."),
+        "roadmap": ("Nhận xét điểm mạnh/yếu kỹ thuật của học viên và lời khuyên học tập cho từng chặng.",
+                    "Nhận xét kỹ năng + lời khuyên theo chặng."),
+    },
+    "secretary": {
+        "role": "Thư ký",
+        "goal": "Sắp xếp lịch và văn bản liên lạc rõ ràng, đúng hạn",
+        "backstory": "Thư ký chu đáo, quản lý lịch làm việc và soạn thông báo chuyên nghiệp.",
+        "course": ("Lên lịch khai giảng, lịch học theo tuần, mẫu thông báo và thư mời học viên.",
+                   "Lịch khai giảng & lịch học + mẫu thông báo / thư mời."),
+        "roadmap": ("Sắp lịch các buổi tư vấn, nhắc các mốc học tập và soạn mẫu email liên lạc với học viên.",
+                    "Lịch tư vấn + mốc nhắc nhở + mẫu email."),
+    },
+    "clerklead": {
+        "role": "Trưởng nhân viên văn phòng",
+        "goal": "Điều phối công việc hành chính để khoá học vận hành trơn tru",
+        "backstory": "Trưởng bộ phận văn phòng nhiều kinh nghiệm, nắm rõ quy trình và nguồn lực của trung tâm.",
+        "course": ("Lập kế hoạch hành chính cho khoá học: nhân sự, phòng học, thiết bị, mốc thời gian và phân công.",
+                   "Kế hoạch hành chính (nhân sự, phòng, thiết bị, mốc thời gian)."),
+        "roadmap": ("Đề xuất thủ tục đăng ký, chính sách hỗ trợ học viên và đầu mối liên hệ.",
+                    "Thủ tục đăng ký + chính sách hỗ trợ + đầu mối liên hệ."),
+    },
+    "clerk": {
+        "role": "Nhân viên văn phòng",
+        "goal": "Chuẩn bị hồ sơ, giấy tờ chính xác và đầy đủ",
+        "backstory": "Nhân viên văn phòng cẩn thận, quen việc biểu mẫu và hồ sơ học viên.",
+        "course": ("Chuẩn bị mẫu hồ sơ đăng ký, danh sách lớp, biểu mẫu điểm danh và mẫu chứng nhận hoàn thành.",
+                   "Bộ biểu mẫu: đăng ký, danh sách lớp, điểm danh, chứng nhận."),
+        "roadmap": ("Liệt kê giấy tờ cần chuẩn bị và quy trình đăng ký từng khoá trong lộ trình.",
+                    "Danh sách giấy tờ + quy trình đăng ký."),
+    },
+    "admissions": {
+        "role": "Chuyên viên tuyển sinh",
+        "goal": "Đưa chương trình tới đúng người học và truyền thông trung thực",
+        "backstory": "Chuyên viên tuyển sinh hiểu thị trường đào tạo CNTT, ưu tiên thông tin minh bạch cho người học.",
+        "course": ("Đề xuất tên khoá học, thông điệp chính, điểm khác biệt, học phí tham khảo theo thị trường (ghi rõ là ước tính) "
+                   "và kế hoạch tuyển sinh ngắn gọn.",
+                   "Tên khoá, thông điệp, học phí ước tính, kế hoạch tuyển sinh."),
+        "roadmap": ("Gợi ý hình thức học phù hợp với quỹ thời gian và ngân sách của học viên (lớp tối, cuối tuần, online, kèm 1-1), "
+                    "ước tính chi phí (ghi rõ là ước tính).",
+                    "Phương án học phù hợp + chi phí ước tính."),
+    },
+}
+ROLE_KEYS = tuple(ROLES)
+
+LESSON_TEACHER = (
+    "Bạn đang đứng lớp buổi học này. Soạn BÀI GIẢNG chi tiết theo trình tự trên lớp: mục tiêu buổi học, khởi động, "
+    "lý thuyết trọng tâm (giải thích dễ hiểu), ví dụ code minh hoạ có chú thích, hoạt động thực hành trên lớp, tổng kết.",
+    "Bài giảng chi tiết theo trình tự trên lớp, có ví dụ code.",
 )
-DATA_RULES_LIVE = (
-    "QUY TẮC DỮ LIỆU: Đội có công cụ tra dữ liệu thị trường (Yahoo Finance): 'stock_snapshot' (giá, chỉ số định giá, "
-    "biến động) và 'financial_statements' (báo cáo tài chính năm). Cổ phiếu sàn HOSE dùng mã có đuôi .VN (vd. VNM.VN), "
-    "Nhật dùng 4 số + .T (vd. 7203.T), Mỹ dùng mã gốc (vd. AAPL); sàn HNX/UPCoM KHÔNG có trong nguồn này. "
-    "Với mã cổ phiếu liên quan tới yêu cầu, HÃY dùng công cụ để lấy giá và chỉ số MỚI NHẤT thay vì dựa vào trí nhớ; "
-    "mỗi số liệu lấy từ công cụ phải ghi nguồn và thời điểm (vd. 'Yahoo Finance, ngày 2026-11-10'). "
-    "Thông tin công cụ không có (tin tức, sự kiện, kế hoạch kinh doanh...) chỉ dùng kiến thức bạn chắc chắn, ghi rõ mốc "
-    "thời gian và nói rõ có thể đã lỗi thời. Đánh dấu rõ số nào là ƯỚC TÍNH; tuyệt đối không bịa số liệu. "
-    "Nếu công cụ báo lỗi hoặc không có dữ liệu, hãy nói thẳng như vậy."
+LESSON_ASSISTANT = (
+    "Bạn là trợ lý ngồi cuối lớp hỗ trợ giảng viên. Dựa trên bài giảng, soạn: bài tập về nhà (3–5 bài, từ dễ tới khó) kèm "
+    "đáp án/gợi ý, 5 câu hỏi trắc nghiệm kiểm tra nhanh kèm đáp án, các lỗi học viên hay gặp và cách hỗ trợ.",
+    "Bài tập về nhà + đáp án, câu hỏi kiểm tra nhanh, lỗi thường gặp.",
 )
-DATA_RULES = DATA_RULES_LIVE if data_tools_available() else DATA_RULES_OFFLINE
-# Giới hạn số lần tra mỗi người (mỗi lần tra là thêm lượt gọi AI -> tốn hạn mức API).
-TOOL_LIMIT = int(os.getenv("DATA_TOOL_LIMIT", "6"))
-
-
-def data_tools(*kinds: str) -> list:
-    if not data_tools_available():
-        return []
-    make = {"snapshot": StockSnapshotTool, "statements": FinancialStatementsTool}
-    return [make[k](max_usage_count=TOOL_LIMIT) for k in kinds]
-
+DIRECTOR_TASK = {
+    "course": ("ĐỀ CƯƠNG KHOÁ HỌC",
+               "1) Tổng quan khoá học (tên, đối tượng, điều kiện đầu vào, hình thức, thời lượng); 2) Mục tiêu đầu ra; "
+               "3) Nội dung chi tiết theo tuần/buổi (bảng); 4) Dự án cuối khoá; 5) Phương pháp & tiêu chí đánh giá; "
+               "6) Tài liệu & công cụ; 7) Ghi chú cho khách hàng (điều cần kiểm chứng thêm, phần nào là ước tính)."),
+    "roadmap": ("LỘ TRÌNH HỌC TẬP CÁ NHÂN",
+                "1) Tóm tắt hồ sơ & mục tiêu; 2) Đánh giá năng lực hiện tại và khoảng cách cần lấp; 3) Lộ trình theo chặng "
+                "(bảng: chặng / nội dung / thời lượng / kết quả cần đạt); 4) Kế hoạch học hằng tuần; 5) Mốc kiểm tra & chứng chỉ; "
+                "6) Tài nguyên gợi ý; 7) Lưu ý (phần nào là ước tính, cần kiểm chứng thêm)."),
+    "lesson": ("GIÁO ÁN BUỔI HỌC",
+               "1) Thông tin buổi học (chủ đề, lớp, giảng viên, trợ lý, sĩ số); 2) Mục tiêu; 3) Tiến trình buổi học theo phút "
+               "(bảng); 4) Nội dung bài giảng; 5) Bài tập & câu hỏi kiểm tra kèm đáp án; 6) Ghi chú cho giảng viên và trợ lý."),
+}
+DISCLAIMER = (
+    "Kết thúc bằng mục 'Lưu ý': tài liệu do đội ngũ AI soạn, chỉ mang tính tham khảo, cần giảng viên/chuyên gia rà soát "
+    "trước khi sử dụng; thông tin về công nghệ, chứng chỉ, học phí có thể đã thay đổi."
+)
 
 # ---------------------------------------------------------------------------
-# Đa ngôn ngữ: báo cáo + thông báo trạng thái + lỗi theo ngôn ngữ người dùng chọn (vi / en / ja).
+# Đa ngôn ngữ: tài liệu + thông báo trạng thái + lỗi theo ngôn ngữ người dùng chọn (vi / en / ja).
 # ---------------------------------------------------------------------------
 LANG_NAME = {"vi": "tiếng Việt", "en": "English", "ja": "日本語 (Japanese)"}
 CLIENT_ADDRESS = {"vi": "Quý khách {name}", "en": "{name}", "ja": "{name}様"}
@@ -198,8 +317,11 @@ CLIENT_ADDRESS = {"vi": "Quý khách {name}", "en": "{name}", "ja": "{name}様"}
 MSG = {
     "vi": {
         "assigning": "Đang phân công công việc", "monitoring": "Đã giao việc, theo dõi tiến độ",
-        "work": {"analyst": "Đang nghiên cứu doanh nghiệp", "quant": "Đang định giá & lập kịch bản",
-                 "risk": "Đang thẩm định rủi ro", "manager": "Đang viết báo cáo đầu tư"},
+        "work": {"sensei": "Đang soạn bài & phương pháp kèm cặp", "secretary": "Đang lên lịch & soạn thông báo", "clerklead": "Đang lập kế hoạch hành chính", "clerk": "Đang chuẩn bị biểu mẫu, hồ sơ", "headta": "Đang chuẩn bị học liệu & hồ sơ lớp", "curriculum": "Đang thiết kế chương trình", "teacher": "Đang soạn nội dung bài giảng",
+                 "advisor": "Đang phân tích nhu cầu học viên", "qa": "Đang rà soát & thiết kế đánh giá",
+                 "ta": "Đang soạn tài liệu bổ trợ", "admissions": "Đang lên phương án tuyển sinh"},
+        "lesson_teacher": "Đang giảng bài trên lớp", "lesson_assistant": "Đang hỗ trợ lớp ở cuối phòng",
+        "director": {"course": "Đang viết đề cương khoá học", "roadmap": "Đang viết lộ trình học tập", "lesson": "Đang duyệt giáo án"},
         "done": "Xong phần việc", "ready": "Sẵn sàng cho việc tiếp theo", "stopped": "Dừng do lỗi",
         "task_error": "Lỗi: {error}",
         "bad_model": "Model không hợp lệ: {key}", "no_key": "Chưa có {env} trong .env cho {label}.",
@@ -212,13 +334,15 @@ MSG = {
         "resuming": "Máy chủ AI đang quá tải – chờ {s} giây rồi làm tiếp từ bước này ({n}/{max})",
         "no_credit": "Tài khoản API của {models} đã hết tiền/credit (không phải lỗi gọi quá nhanh). Hãy nạp thêm credit trong trang Billing của nhà cung cấp, hoặc chọn model của hãng khác.",
         "overloaded": "Máy chủ {models} đang quá tải (đã tự thử lại nhưng chưa được). Đây là lỗi tạm thời phía nhà cung cấp – hãy gửi lại sau ít phút hoặc chọn model khác.",
-        "tool": {"stock_snapshot": "Tra giá & chỉ số {symbol}", "financial_statements": "Tra báo cáo tài chính {symbol}"},
-        "tool_error": "Tra cứu {symbol} không thành công",
+        "bad_team": "Danh sách thành viên không hợp lệ.",
     },
     "en": {
         "assigning": "Assigning tasks", "monitoring": "Tasks assigned, monitoring progress",
-        "work": {"analyst": "Researching the company", "quant": "Valuing & building scenarios",
-                 "risk": "Reviewing risks", "manager": "Writing the investment report"},
+        "work": {"sensei": "Preparing lessons & mentoring", "secretary": "Scheduling & drafting notices", "clerklead": "Planning administration", "clerk": "Preparing forms & records", "headta": "Preparing materials & class records", "curriculum": "Designing the curriculum", "teacher": "Writing lesson content",
+                 "advisor": "Analysing learner needs", "qa": "Reviewing & designing assessments",
+                 "ta": "Preparing support materials", "admissions": "Planning enrolment"},
+        "lesson_teacher": "Teaching the class", "lesson_assistant": "Supporting the class from the back row",
+        "director": {"course": "Writing the course syllabus", "roadmap": "Writing the learning roadmap", "lesson": "Reviewing the lesson plan"},
         "done": "Part done", "ready": "Ready for the next task", "stopped": "Stopped due to an error",
         "task_error": "Error: {error}",
         "bad_model": "Invalid model: {key}", "no_key": "{env} is missing in .env for {label}.",
@@ -231,13 +355,15 @@ MSG = {
         "resuming": "The AI servers are overloaded – waiting {s}s, then continuing from this step ({n}/{max})",
         "no_credit": "The API account for {models} has no credits left (this is not a rate limit). Add credits on the provider's Billing page, or pick a model from another provider.",
         "overloaded": "The {models} servers are overloaded (automatic retries didn't help). This is a temporary provider-side issue – resend in a few minutes or pick another model.",
-        "tool": {"stock_snapshot": "Looking up price & ratios for {symbol}", "financial_statements": "Looking up financial statements for {symbol}"},
-        "tool_error": "Lookup for {symbol} failed",
+        "bad_team": "Invalid team list.",
     },
     "ja": {
         "assigning": "タスクを割り振り中", "monitoring": "割り振り完了、進捗を確認中",
-        "work": {"analyst": "企業を調査中", "quant": "バリュエーションとシナリオ作成中",
-                 "risk": "リスクを審査中", "manager": "投資レポートを作成中"},
+        "work": {"sensei": "授業と指導方法を準備中", "secretary": "日程調整・案内文を作成中", "clerklead": "事務計画を作成中", "clerk": "書類・様式を準備中", "headta": "教材とクラス書類を準備中", "curriculum": "カリキュラムを設計中", "teacher": "講義内容を作成中",
+                 "advisor": "受講者のニーズを分析中", "qa": "評価を設計・レビュー中",
+                 "ta": "補助教材を作成中", "admissions": "募集計画を作成中"},
+        "lesson_teacher": "授業中", "lesson_assistant": "教室の後ろでサポート中",
+        "director": {"course": "コースシラバスを作成中", "roadmap": "学習ロードマップを作成中", "lesson": "指導案を審査中"},
         "done": "担当完了", "ready": "次のタスクの準備OK", "stopped": "エラーで停止",
         "task_error": "エラー：{error}",
         "bad_model": "無効なモデル：{key}", "no_key": "{label} 用の {env} が .env にありません。",
@@ -250,106 +376,152 @@ MSG = {
         "resuming": "AIサーバーが混雑中 – {s}秒待ってからこの工程を再開します（{n}/{max}）",
         "no_credit": "{models} のAPIアカウントのクレジットが残っていません（速度制限ではありません）。提供元の Billing ページでクレジットを追加するか、別のプロバイダーのモデルを選んでください。",
         "overloaded": "{models} のサーバーが混雑しています（自動で再試行しましたが失敗）。提供元の一時的な問題です。数分後に再送するか、別のモデルを選んでください。",
-        "tool": {"stock_snapshot": "{symbol} の株価・指標を照会中", "financial_statements": "{symbol} の財務諸表を照会中"},
-        "tool_error": "{symbol} の照会に失敗しました",
+        "bad_team": "メンバーの指定が正しくありません。",
     },
 }
 
 
-def build_crew(prompt: str, leader_key: str, team_key: str, client: str, lang: str = "vi"):
-    leader_llm, team_llm = build_llm(leader_key), build_llm(team_key)
-    addressed = CLIENT_ADDRESS[lang].format(name=client)
+# ---------------------------------------------------------------------------
+# Đầu vào
+# ---------------------------------------------------------------------------
+class Member(BaseModel):
+    id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,24}$")
+    name: str = Field(min_length=1, max_length=40)
+    role: Role
+    gender: Literal["male", "female"] | None = None
+
+
+class LessonInfo(BaseModel):
+    room: str = Field(default="", max_length=40)
+    students: int = Field(default=0, ge=0, le=60)
+    teacher: str = Field(pattern=r"^[A-Za-z0-9_-]{1,24}$")
+    # Tối đa 2 trợ giảng ngồi cuối lớp. "assistant" (một người) giữ lại cho bản giao diện cũ.
+    assistants: list[str] = Field(default_factory=list, max_length=2)
+    assistant: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,24}$")
+
+    @model_validator(mode="after")
+    def merge(self) -> "LessonInfo":
+        ids = [*self.assistants, *([self.assistant] if self.assistant else [])]
+        if any(not re.fullmatch(r"[A-Za-z0-9_-]{1,24}", i) for i in ids):
+            raise ValueError("bad assistant id")
+        self.assistants = list(dict.fromkeys(ids))[:2]
+        self.assistant = None
+        return self
+
+
+class JobInput(BaseModel):
+    prompt: str = Field(min_length=1, max_length=8000)
+    client_name: str = Field(min_length=1, max_length=60)
+    language: Literal["vi", "en", "ja"] = "vi"
+    kind: Kind = "course"
+    director: Member
+    team: list[Member] = Field(default_factory=list, max_length=12)
+    lesson: LessonInfo | None = None
+    manager_choice: str = Field(default_factory=lambda: default_model(LEADER_PREFERENCE))
+    worker_choice: str = Field(default_factory=lambda: default_model(TEAM_PREFERENCE))
+
+    @model_validator(mode="after")
+    def check(self) -> "JobInput":
+        ids = [m.id for m in self.team]
+        if len(set(ids)) != len(ids) or self.director.id in ids or any(m.role == "director" for m in self.team):
+            raise ValueError("duplicate or misplaced team member")
+        if self.kind == "lesson":
+            # Giám đốc kiêm giảng viên: được đứng lớp (không nằm trong team).
+            if not self.lesson or (self.lesson.teacher not in ids and self.lesson.teacher != self.director.id):
+                raise ValueError("lesson needs a teacher")
+            if any(a not in ids or a == self.lesson.teacher for a in self.lesson.assistants):
+                raise ValueError("assistants must be in the team")
+        elif not self.team:
+            raise ValueError("team must not be empty")
+        return self
+
+
+def build_crew(job: JobInput):
+    leader_llm, team_llm = build_llm(job.manager_choice), build_llm(job.worker_choice)
+    lang = job.language
+    addressed = CLIENT_ADDRESS[lang].format(name=job.client_name.strip())
+    lesson_line = ""
+    if job.kind == "lesson" and job.lesson:
+        names = {m.id: m.name for m in job.team}
+        names[job.director.id] = job.director.name
+        lesson_line = (
+            f"\nThông tin buổi học: phòng {job.lesson.room or 'phòng học'}, sĩ số {job.lesson.students} học viên, "
+            f"giảng viên {names[job.lesson.teacher]}"
+            + (f", trợ giảng {', '.join(names[a] for a in job.lesson.assistants)} (ngồi cuối lớp)" if job.lesson.assistants else "") + "."
+        )
     brief = (
-        f"Khách hàng: {addressed}\nYêu cầu của khách hàng:\n{prompt}\n\n{DATA_RULES}\n\n"
-        f"NGÔN NGỮ ĐẦU RA: viết TOÀN BỘ câu trả lời bằng {LANG_NAME[lang]} (kể cả tiêu đề các mục và phần miễn trừ trách nhiệm); "
+        f"GKI là trung tâm đào tạo CNTT. Khách hàng: {addressed}\nYêu cầu của khách hàng:\n{job.prompt}{lesson_line}\n\n"
+        "QUY TẮC: chỉ dùng kiến thức bạn chắc chắn; với thông tin dễ thay đổi (phiên bản công nghệ, chứng chỉ, học phí, "
+        "thị trường việc làm) hãy ghi rõ có thể đã lỗi thời; đánh dấu rõ số nào là ƯỚC TÍNH; không bịa nguồn.\n\n"
+        f"NGÔN NGỮ ĐẦU RA: viết TOÀN BỘ câu trả lời bằng {LANG_NAME[lang]} (kể cả tiêu đề các mục); "
         f"xưng hô với khách hàng là \"{addressed}\"."
     )
 
-    analyst = Agent(
-        role="Chuyên viên phân tích",
-        goal="Nghiên cứu cơ bản doanh nghiệp, ngành và bối cảnh vĩ mô liên quan tới yêu cầu của khách hàng",
-        backstory="Chuyên viên phân tích cổ phiếu nhiều năm kinh nghiệm, đọc kỹ báo cáo tài chính và luôn ghi nguồn, mốc thời gian.",
-        llm=team_llm,
-        tools=data_tools("snapshot", "statements"),
-    )
-    quant = Agent(
-        role="Chuyên viên định lượng",
-        goal="Lượng hoá định giá, kịch bản và đề xuất tỷ trọng phân bổ phù hợp khẩu vị rủi ro của khách hàng",
-        backstory="Chuyên viên định lượng thận trọng, mọi con số đều kèm giả định rõ ràng và không bao giờ bịa dữ liệu.",
-        llm=team_llm,
-        tools=data_tools("snapshot", "statements"),
-    )
-    risk = Agent(
-        role="Quản trị rủi ro",
-        goal="Phát hiện rủi ro, lỗ hổng lập luận và đặt quy tắc kiểm soát rủi ro cho khuyến nghị",
-        backstory="Chuyên viên quản trị rủi ro khó tính, luôn hỏi 'nếu sai thì mất bao nhiêu?' và soi từng giả định.",
-        llm=team_llm,
-        tools=data_tools("snapshot"),
-    )
-    manager = Agent(
-        role="Giám đốc đầu tư",
-        goal="Tổng hợp, thẩm định và ký duyệt Báo cáo đầu tư gửi khách hàng",
-        backstory="Giám đốc đầu tư điềm tĩnh, đặt lợi ích và sự an toàn của khách hàng lên trên hết, viết báo cáo rõ ràng, trung thực.",
-        llm=leader_llm,
-    )
+    def make_agent(m: Member, llm: LLM) -> Agent:
+        spec = ROLES[m.role]
+        gender = {"male": " Bạn là nam.", "female": " Bạn là nữ."}.get(m.gender or "", "")
+        return Agent(role=f"{spec['role']} ({m.name})", goal=spec["goal"], backstory=spec["backstory"] + gender, llm=llm)
 
-    research = Task(
+    agents: list[Agent] = []
+    tasks: list[Task] = []
+    agent_ids: dict[int, str] = {}
+    task_ids: dict[int, str] = {}
+    order: list[str] = []
+    working_msg: dict[str, str] = {}
+    M = MSG[lang]
+
+    members = list(job.team)
+    director_teaches = job.kind == "lesson" and job.lesson and job.lesson.teacher == job.director.id
+    if job.kind == "lesson" and job.lesson:
+        members = [job.director] if director_teaches else [m for m in job.team if m.id == job.lesson.teacher]
+        members += [m for a in job.lesson.assistants for m in job.team if m.id == a]
+    director = make_agent(job.director, leader_llm)
+
+    for m in members:
+        agent = director if m.id == job.director.id else make_agent(m, team_llm)
+        if job.kind == "lesson":
+            is_teacher = job.lesson and m.id == job.lesson.teacher
+            desc, expected = LESSON_TEACHER if is_teacher else LESSON_ASSISTANT
+            working_msg[m.id] = M["lesson_teacher"] if is_teacher else M["lesson_assistant"]
+        else:
+            desc, expected = ROLES[m.role][job.kind]
+            working_msg[m.id] = M["work"][m.role]
+        task = Task(description=f"{brief}\n\nNhiệm vụ của bạn: {desc}", expected_output=expected,
+                    agent=agent, context=list(tasks))
+        if agent is not director:
+            agents.append(agent)
+        tasks.append(task)
+        agent_ids[id(agent)] = m.id
+        task_ids[id(task)] = m.id
+        order.append(m.id)
+
+    title, sections = DIRECTOR_TASK[job.kind]
+    final = Task(
         description=(
-            f"{brief}\n\nNhiệm vụ: nghiên cứu cơ bản – mô hình kinh doanh, vị thế cạnh tranh, tình hình tài chính "
-            "gần nhất (tra bằng công cụ nếu có), động lực tăng trưởng, yếu tố ngành/vĩ mô/chính sách ảnh hưởng."
+            f"{brief}\n\nNhiệm vụ: tổng hợp kết quả của đồng đội, sửa chỗ chưa chính xác và viết {title} "
+            f"hoàn chỉnh gửi {addressed} bằng Markdown, gồm: {sections} {DISCLAIMER}"
         ),
-        expected_output="Bản nghiên cứu cơ bản dạng gạch đầu dòng, mỗi số liệu có nguồn và mốc thời gian.",
-        agent=analyst,
+        expected_output=f"{title} hoàn chỉnh bằng Markdown.",
+        agent=director,
+        context=list(tasks),
     )
-    valuation = Task(
-        description=(
-            f"{brief}\n\nNhiệm vụ: dựa trên nghiên cứu, lượng hoá – các chỉ số định giá chính (P/E, P/B, ROE, "
-            "EV/EBITDA... nếu phù hợp) so với ngành, 3 kịch bản (xấu / cơ sở / tốt) với giả định rõ ràng, "
-            "và đề xuất tỷ trọng + cách giải ngân phù hợp yêu cầu của khách hàng."
-        ),
-        expected_output="Bảng chỉ số, 3 kịch bản định giá có giả định, đề xuất phân bổ vốn.",
-        agent=quant,
-        context=[research],
-    )
-    risk_review = Task(
-        description=(
-            f"{brief}\n\nNhiệm vụ: thẩm định rủi ro – rủi ro doanh nghiệp, ngành, vĩ mô, thanh khoản; kiểm tra "
-            "giả định của Chuyên viên định lượng; stress test; đề xuất quy tắc cắt lỗ/chốt lời và giới hạn tỷ trọng; "
-            "chỉ ra mọi chỗ thiếu căn cứ hoặc có thể đã lỗi thời."
-        ),
-        expected_output="Danh sách rủi ro xếp theo mức độ, kết quả stress test, quy tắc kiểm soát rủi ro.",
-        agent=risk,
-        context=[research, valuation],
-    )
-    report = Task(
-        description=(
-            f"{brief}\n\nNhiệm vụ: viết BÁO CÁO ĐẦU TƯ gửi {addressed} bằng Markdown, gồm: "
-            "1) Tóm tắt khuyến nghị (Mua / Nắm giữ / Bán / Theo dõi) và mức độ tin cậy; 2) Luận điểm đầu tư; "
-            "3) Định giá & kịch bản; 4) Kế hoạch phân bổ vốn; 5) Rủi ro & cách kiểm soát; 6) Việc khách hàng nên kiểm chứng thêm. "
-            "Kết thúc bằng mục 'Miễn trừ trách nhiệm': báo cáo do AI tạo, không phải tư vấn đầu tư được cấp phép, "
-            "dữ liệu có thể lỗi thời, khách hàng tự chịu trách nhiệm với quyết định của mình. "
-            "Ngay trước mục đó, thêm mục 'Nguồn dữ liệu' liệt kê nguồn và thời điểm của các số liệu chính "
-            "(phần nào tra từ công cụ, phần nào chỉ dựa trên kiến thức của AI)."
-        ),
-        expected_output="Báo cáo đầu tư hoàn chỉnh bằng Markdown, có mục miễn trừ trách nhiệm.",
-        agent=manager,
-        context=[research, valuation, risk_review],
-    )
+    agents.append(director)
+    tasks.append(final)
+    agent_ids[id(director)] = job.director.id
+    task_ids[id(final)] = job.director.id
+    order.append(job.director.id)
+    # Giám đốc đứng lớp: lúc đầu là "đang giảng bài", tới bước cuối (seq[-1]) đổi sang "đang duyệt giáo án".
+    final_msg = M["director"][job.kind]
+    working_msg.setdefault(job.director.id, final_msg)
 
     crew = Crew(
-        agents=[analyst, quant, risk, manager],
-        tasks=[research, valuation, risk_review, report],
+        agents=agents,
+        tasks=tasks,
         process=Process.sequential,
         # Gói miễn phí giới hạn số request/phút; CrewAI tự chờ khi chạm ngưỡng này thay vì nhận lỗi 429.
         max_rpm=int(os.getenv("CREW_MAX_RPM", "8")),
     )
-    agent_ids = {id(analyst): "analyst", id(quant): "quant", id(risk): "risk", id(manager): "manager"}
-    task_ids = {id(research): "analyst", id(valuation): "quant", id(risk_review): "risk", id(report): "manager"}
-    order = ["analyst", "quant", "risk", "manager"]
-    return crew, agent_ids, task_ids, order
-
-
-WORKING_STATUS = {"analyst": "working", "quant": "working", "risk": "working", "manager": "reviewing"}
+    return crew, agent_ids, task_ids, order, working_msg, final_msg
 
 
 def explain_error(exc: Exception, leader_key: str, team_key: str, lang: str = "vi") -> str:
@@ -412,21 +584,24 @@ def kickoff_with_resume(crew: Crew, task_ids: dict[int, str], M: dict) -> Any:
             current = Crew(agents=agents, tasks=remaining, process=Process.sequential, max_rpm=crew.max_rpm)
 
 
-def run_job(prompt: str, leader_key: str, team_key: str, client: str, lang: str = "vi") -> None:
+def run_job(job: JobInput) -> None:
+    ids = [job.director.id, *(m.id for m in job.team)]
     try:
-        _run_job(prompt, leader_key, team_key, client, lang)
+        _run_job(job)
     except Exception as exc:  # noqa: BLE001 – vd. lỗi khi khởi tạo LLM/agent
-        for sid in STAFF_IDS:
-            office.status(sid, "idle", MSG[lang]["stopped"])
-        office.emit({"type": "job", "state": "failed", "error": explain_error(exc, leader_key, team_key, lang)})
+        for sid in ids:
+            office.status(sid, "idle", MSG[job.language]["stopped"])
+        office.emit({"type": "job", "state": "failed",
+                     "error": explain_error(exc, job.manager_choice, job.worker_choice, job.language)})
     finally:
         office.busy = False
         job_lock.release()
 
 
-def _run_job(prompt: str, leader_key: str, team_key: str, client: str, lang: str = "vi") -> None:
-    M = MSG[lang]
-    crew, agent_ids, task_ids, order = build_crew(prompt, leader_key, team_key, client, lang)
+def _run_job(job: JobInput) -> None:
+    M = MSG[job.language]
+    crew, agent_ids, task_ids, order, working_msg, final_msg = build_crew(job)
+    director_id = job.director.id
 
     # Ánh xạ theo id() đối tượng; nếu CrewAI có sao chép đối tượng thì rơi về tên vai trò.
     roles = {a.role: sid for a in crew.agents for k, sid in agent_ids.items() if id(a) == k}
@@ -443,22 +618,31 @@ def _run_job(prompt: str, leader_key: str, team_key: str, client: str, lang: str
         task = getattr(event, "from_task", None)
         return agent_ids.get(id(agent)) or task_ids.get(id(task)) or by_role(agent) or by_role(getattr(task, "agent", None))
 
+    # Quy trình tuần tự: bước đang chạy = số bước đã xong (đúng cả khi chạy tiếp sau lỗi tạm thời,
+    # và khi Giám đốc vừa đứng lớp vừa duyệt – một người hai bước).
+    progress = {"done": 0}
+
     def on_task_started(source, event):
         sid = staff_of_task(event)
-        if sid == "analyst":
-            office.status("manager", "idle", M["monitoring"])
-        if sid:
-            office.status(sid, WORKING_STATUS[sid], M["work"][sid])
+        if not sid:
+            return
+        step = min(progress["done"], len(order) - 1)
+        final = step == len(order) - 1
+        if step == 0 and sid != director_id:
+            office.status(director_id, "idle", M["monitoring"])
+        office.status(sid, "reviewing" if final else "working", final_msg if final else working_msg[sid])
 
     def on_task_completed(source, event):
         sid = staff_of_task(event)
         if not sid:
             return
+        step = progress["done"]
+        progress["done"] += 1
         office.status(sid, "done", M["done"])
-        idx = order.index(sid)
-        if idx + 1 < len(order):
+        nxt = order[step + 1] if step + 1 < len(order) else None
+        if nxt and nxt != sid:
             office.emit({
-                "type": "handoff", "from": sid, "to": order[idx + 1],
+                "type": "handoff", "from": sid, "to": nxt,
                 "message": short(getattr(event.output, "raw", ""), 120),
             })
 
@@ -472,30 +656,6 @@ def _run_job(prompt: str, leader_key: str, team_key: str, client: str, lang: str
         if sid:
             office.emit({"type": "activity", "agent": sid, "kind": "thinking"})
 
-    def tool_event(event, key: str):
-        agent = getattr(event, "agent", None)
-        sid = agent_ids.get(id(agent)) or by_role(agent) or roles.get(getattr(event, "agent_role", None))
-        args = getattr(event, "tool_args", {}) or {}
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except ValueError:
-                args = {"symbol": args}
-        symbol = short(str(args.get("symbol", "")), 20) if isinstance(args, dict) else ""
-        name = getattr(event, "tool_name", "")
-        text = M["tool"].get(name, name).format(symbol=symbol) if key == "start" else M["tool_error"].format(symbol=symbol)
-        return sid, text
-
-    def on_tool_started(source, event):
-        sid, text = tool_event(event, "start")
-        if sid:
-            office.emit({"type": "activity", "agent": sid, "kind": "tool", "message": text})
-
-    def on_tool_error(source, event):
-        sid, text = tool_event(event, "error")
-        if sid:
-            office.emit({"type": "activity", "agent": sid, "kind": "tool_error", "message": text})
-
     def on_llm_completed(source, event):
         sid = staff_of_llm(event)
         if sid:
@@ -508,8 +668,6 @@ def _run_job(prompt: str, leader_key: str, team_key: str, client: str, lang: str
         (TaskFailedEvent, on_task_failed),
         (LLMCallStartedEvent, on_llm_started),
         (LLMCallCompletedEvent, on_llm_completed),
-        (ToolUsageStartedEvent, on_tool_started),
-        (ToolUsageErrorEvent, on_tool_error),
     ]
     for event_type, handler in handlers:
         crewai_event_bus.on(event_type)(handler)
@@ -522,7 +680,7 @@ def _run_job(prompt: str, leader_key: str, team_key: str, client: str, lang: str
             crewai_event_bus.off(event_type, handler)
 
     office.result = str(output)
-    for sid in STAFF_IDS:
+    for sid in order:
         office.status(sid, "idle", M["ready"])
     office.emit({"type": "job", "state": "finished", "result": office.result})
 
@@ -530,14 +688,6 @@ def _run_job(prompt: str, leader_key: str, team_key: str, client: str, lang: str
 # ---------------------------------------------------------------------------
 # HTTP / WebSocket
 # ---------------------------------------------------------------------------
-class JobInput(BaseModel):
-    prompt: str = Field(min_length=1, max_length=8000)
-    client_name: str = Field(min_length=1, max_length=60)
-    language: Literal["vi", "en", "ja"] = "vi"
-    manager_choice: str = Field(default_factory=lambda: default_model(LEADER_PREFERENCE))
-    worker_choice: str = Field(default_factory=lambda: default_model(TEAM_PREFERENCE))
-
-
 @app.get("/")
 async def index() -> FileResponse:
     return FileResponse(BASE_DIR / "index.html")
@@ -570,16 +720,12 @@ async def assign_task(job: JobInput):
 
     office.busy = True
     office.result = None
-    office.emit({"type": "job", "state": "started", "prompt": short(job.prompt, 120)})
-    office.status("manager", "thinking", M["assigning"])
+    office.agents = {sid: {"status": "idle", "message": ""} for sid in [job.director.id, *(m.id for m in job.team)]}
+    office.emit({"type": "job", "state": "started", "prompt": short(job.prompt, 120), "kind": job.kind})
+    office.status(job.director.id, "thinking", M["assigning"])
 
     # Thread riêng (daemon) – không phụ thuộc vào việc giữ tham chiếu asyncio.Task.
-    threading.Thread(
-        target=run_job,
-        args=(job.prompt, job.manager_choice, job.worker_choice, job.client_name.strip(), job.language),
-        name="office-job",
-        daemon=True,
-    ).start()
+    threading.Thread(target=run_job, args=(job,), name="office-job", daemon=True).start()
     return {"message": "Nhiệm vụ đã được chuyển tới văn phòng!"}
 
 

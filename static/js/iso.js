@@ -1,8 +1,8 @@
 // Phép chiếu isometric + các hàm vẽ khối cơ bản dùng chung cho cả văn phòng.
 
 export const ISO = Object.freeze({ originX: 310, originY: 110, kx: 0.495, ky: 0.44 });
-// Phòng nằm trong toạ độ thế giới [min, max] trên cả hai trục; tường ở x = wall và y = wall.
-export const ROOM = Object.freeze({ min: 30, max: 530, wall: 24 });
+// Khung bao của mặt bằng (hình chữ L, xem floorplan.js) trong toạ độ thế giới; tường sau ở x = wall và y = wall.
+export const ROOM = Object.freeze({ min: 30, max: 760, wall: 24 });
 
 let ctx = null;
 export function bindContext(context) { ctx = context; }
@@ -117,9 +117,32 @@ function screenOverlap(A, B) {
   return true;
 }
 
+// Vách mỏng ({ wall: { plane, at } }) và một vật khác chồng khung bao (vd. người ngồi sát vách): khung bao không
+// đủ để biết ai trước ai sau, nên xét TÂM vật nằm phía nào của mặt phẳng vách. Phía x/y lớn hơn = gần người xem
+// -> vẽ sau vách. Trả về 1 nếu vật ở phía trước vách, -1 nếu phía sau, 0 nếu không liên quan (không cùng đoạn).
+function wallSide(W, O) {
+  const { plane, at } = W.wall, B = W.bounds, C = O.bounds;
+  const cx = (C.x0 + C.x1) / 2, cy = (C.y0 + C.y1) / 2;
+  if (plane === "x") {
+    if (C.y1 <= B.y0 + EPS || C.y0 >= B.y1 - EPS) return 0;
+    // Tâm vật ra ngoài đầu mút vách: vật đứng cạnh đầu vách, không bị vách che – xét theo hướng dọc vách.
+    if (cy > B.y1) return 1;
+    if (cy < B.y0) return -1;
+    return cx > at ? 1 : -1;
+  }
+  if (C.x1 <= B.x0 + EPS || C.x0 >= B.x1 - EPS) return 0;
+  if (cx > B.x1) return 1;
+  if (cx < B.x0) return -1;
+  return cy > at ? 1 : -1;
+}
+
 function compare(a, b) {
   const A = a.bounds, B = b.bounds;
   if (!screenOverlap(A, B)) return 0;
+  if (!!a.wall !== !!b.wall) {
+    const side = a.wall ? wallSide(a, b) : wallSide(b, a);
+    if (side) return a.wall ? -side : side; // vật ở trước vách -> vách vẽ trước
+  }
   const overlapX = A.x0 < B.x1 - EPS && B.x0 < A.x1 - EPS;
   const overlapY = A.y0 < B.y1 - EPS && B.y0 < A.y1 - EPS;
   if (overlapX && overlapY) {

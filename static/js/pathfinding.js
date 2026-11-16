@@ -1,8 +1,9 @@
-// Lưới đi lại dựng từ vị trí nội thất thật + A* (8 hướng) + làm mượt đường bằng line-of-sight.
+// Lưới đi lại dựng từ mặt bằng (sàn chữ L + vách ngăn, chừa lối cửa) + vị trí nội thất thật + A* (8 hướng) + làm mượt đường bằng line-of-sight.
 // Thay cho đồ thị nút cố định cũ: giờ nhân viên luôn đi vòng qua đồ đạc, kể cả đồ vừa kéo thả.
 
 import { ROOM } from "./iso.js";
 import { footprint } from "./furniture.js";
+import { onFloorChange, wallBlocks } from "./floorplan.js";
 
 const CELL = 10;
 const N = Math.round((ROOM.max - ROOM.min) / CELL);
@@ -10,7 +11,11 @@ const INFLATE = 9; // bán kính "thân người"
 const WALL_GAP = 8;
 
 const blocked = new Uint8Array(N * N);
+// Phần cố định theo mặt bằng (ngoài sàn, sát tường/vách) – tính lại mỗi khi đổi tầng (rebuildPlan).
+const planMask = new Uint8Array(N * N);
 const component = new Int32Array(N * N);
+let compSize = []; // số ô của từng vùng liên thông
+const POCKET = 40;  // vùng nhỏ hơn thế này = "hốc" bị đồ đạc vây kín (vd. ghế kẹt giữa tủ và thùng rác)
 
 const idx = (i, j) => j * N + i;
 const clampCell = v => Math.max(0, Math.min(N - 1, v));
@@ -18,15 +23,7 @@ const cellOf = (x, y) => [clampCell(Math.floor((x - ROOM.min) / CELL)), clampCel
 const centerOf = (i, j) => ({ x: ROOM.min + i * CELL + CELL / 2, y: ROOM.min + j * CELL + CELL / 2 });
 
 export function rebuild(items) {
-  blocked.fill(0);
-  for (let j = 0; j < N; j++) {
-    for (let i = 0; i < N; i++) {
-      const c = centerOf(i, j);
-      if (c.x < ROOM.min + WALL_GAP || c.y < ROOM.min + WALL_GAP || c.x > ROOM.max - WALL_GAP || c.y > ROOM.max - WALL_GAP) {
-        blocked[idx(i, j)] = 1;
-      }
-    }
-  }
+  blocked.set(planMask);
   for (const item of items) {
     const b = footprint(item);
     const [i0, j0] = cellOf(b.x0 - INFLATE, b.y0 - INFLATE);
@@ -45,6 +42,7 @@ export function rebuild(items) {
 
 function labelComponents() {
   component.fill(-1);
+  compSize = [];
   let label = 0;
   const queue = new Int32Array(N * N);
   for (let start = 0; start < N * N; start++) {
@@ -62,6 +60,7 @@ function labelComponents() {
         if (!blocked[k] && component[k] < 0) { component[k] = label; queue[tail++] = k; }
       }
     }
+    compSize[label] = tail;
     label++;
   }
 }
@@ -94,6 +93,45 @@ function nearestCell(x, y, wantComponent = -1) {
 export function nearestWalkable(x, y) {
   const c = nearestCell(x, y);
   return c ? centerOf(c[0], c[1]) : null;
+}
+
+// Chỉ xét tường/vách (bỏ qua đồ đạc): người bị đồ vây kín vẫn "lách" ra được tới những điểm này (xem findPath).
+const planComponent = new Int32Array(N * N).fill(-1);
+export function rebuildPlan() {
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const c = { x: ROOM.min + i * CELL + CELL / 2, y: ROOM.min + j * CELL + CELL / 2 };
+      planMask[j * N + i] = wallBlocks(c.x, c.y, WALL_GAP) ? 1 : 0;
+    }
+  }
+  planComponent.fill(-1);
+  let label = 0;
+  const queue = new Int32Array(N * N);
+  for (let start = 0; start < N * N; start++) {
+    if (planMask[start] || planComponent[start] >= 0) continue;
+    let head = 0, tail = 0;
+    queue[tail++] = start;
+    planComponent[start] = label;
+    while (head < tail) {
+      const cur = queue[head++];
+      const i = cur % N, j = (cur / N) | 0;
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const ni = i + di, nj = j + dj;
+        if (ni < 0 || nj < 0 || ni >= N || nj >= N) continue;
+        const k = nj * N + ni;
+        if (!planMask[k] && planComponent[k] < 0) { planComponent[k] = label; queue[tail++] = k; }
+      }
+    }
+    label++;
+  }
+}
+rebuildPlan();
+onFloorChange(() => rebuildPlan());
+
+export function reachableByPlan(a, b) {
+  const [ai, aj] = cellOf(a.x, a.y), [bi, bj] = cellOf(b.x, b.y);
+  const ca = planComponent[idx(ai, aj)], cb = planComponent[idx(bi, bj)];
+  return ca >= 0 && ca === cb;
 }
 
 // Hai điểm có đi tới nhau được không (cùng một vùng liên thông)?
@@ -141,11 +179,48 @@ class Heap {
 
 const DIRS = [[1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1], [1, 1, Math.SQRT2], [1, -1, Math.SQRT2], [-1, 1, Math.SQRT2], [-1, -1, Math.SQRT2]];
 
+// Lối thoát khỏi hốc: đường ngắn nhất (chỉ tránh tường/vách, được lách qua đồ đạc) tới ô gần nhất thuộc vùng wantComp.
+function escapeRoute(start, wantComp) {
+  const startK = idx(start[0], start[1]);
+  const prev = new Int32Array(N * N).fill(-2);
+  prev[startK] = -1;
+  const queue = [startK];
+  for (let h = 0; h < queue.length; h++) {
+    const cur = queue[h];
+    if (!blocked[cur] && component[cur] === wantComp) {
+      const cells = [];
+      for (let k = cur; k !== -1; k = prev[k]) cells.unshift(k);
+      return cells.map(k => centerOf(k % N, (k / N) | 0));
+    }
+    const i = cur % N, j = (cur / N) | 0;
+    for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const ni = i + di, nj = j + dj;
+      if (ni < 0 || nj < 0 || ni >= N || nj >= N) continue;
+      const k = idx(ni, nj);
+      if (prev[k] !== -2 || planMask[k]) continue;
+      prev[k] = cur;
+      queue.push(k);
+    }
+  }
+  return null;
+}
+
 // Trả về danh sách điểm cần đi qua (không gồm điểm xuất phát). Mảng rỗng nếu đã ở đích.
+// Bình thường luôn né đồ đạc. CHỈ khi chính người đi đang đứng trong một hốc bị đồ vây kín (vùng rất nhỏ, khác vùng
+// của điểm đến) thì mới lách qua đồ – và chỉ đoạn ngắn nhất để ra khỏi hốc, sau đó lại đi né đồ như thường.
 export function findPath(from, to) {
   const start = nearestCell(from.x, from.y);
   if (!start) return [];
   const comp = component[idx(start[0], start[1])];
+  const target = nearestCell(to.x, to.y);
+  const tcomp = target ? component[idx(target[0], target[1])] : -1;
+  if (tcomp >= 0 && tcomp !== comp && compSize[comp] < POCKET && compSize[tcomp] > compSize[comp]) {
+    const out = escapeRoute(start, tcomp);
+    if (out && out.length) {
+      const exit = out[out.length - 1];
+      return [...out, ...findPath(exit, to)].filter((p, k) => k > 0 || Math.hypot(p.x - from.x, p.y - from.y) > 0.5);
+    }
+  }
   const goalCell = nearestCell(to.x, to.y, comp);
   if (!goalCell) return [];
   const [gi, gj] = goalCell;
